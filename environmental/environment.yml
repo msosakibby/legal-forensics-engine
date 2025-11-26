@@ -1,0 +1,8 @@
+name: legal-ops
+channels:
+  - conda-forge
+dependencies:
+  - git
+  - nodejs=18
+  - terraform
+
