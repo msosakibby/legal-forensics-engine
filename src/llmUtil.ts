@@ -1,4 +1,3 @@
-// src/llmUtil.ts
 import OpenAI from 'openai';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -9,7 +8,7 @@ export async function syncToTypingMind(buffer: Buffer, filename: string) {
   try {
     console.log(`Syncing ${filename} to OpenAI Vector Store...`);
 
-    // 1. OpenAI requires a File object (or path). In Lambda, we write to /tmp first.
+    // 1. OpenAI requires a File stream. In Lambda, we write to /tmp first.
     const tempPath = path.join('/tmp', filename);
     fs.writeFileSync(tempPath, buffer);
 
@@ -27,14 +26,13 @@ export async function syncToTypingMind(buffer: Buffer, filename: string) {
       );
     }
 
-    // Cleanup /tmp
+    // Cleanup
     fs.unlinkSync(tempPath);
     console.log(`Synced ${filename} successfully.`);
     
   } catch (error) {
     console.error("Error syncing to TypingMind:", error);
-    // We don't throw here because we don't want to fail the whole pipeline 
-    // just because the chat sync failed.
+    // Don't throw, so the rest of the pipeline (SQL saving) still finishes
   }
 }
 
