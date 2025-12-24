@@ -1,0 +1,34 @@
+steps:
+  # --- Build Services ---
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Processor'
+    dir: 'processor'
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/processor:latest', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Media Processor'
+    dir: 'media-processor'
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/media-processor:latest', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Splitter'
+    dir: 'splitter'
+    args: ['build', '-t', 'gcr.io/${PROJECT_ID}/splitter:latest', '.']
+
+  # Note: Aggregator and Dispatcher are commented out as they were not found in your directory listing.
+  # - name: 'gcr.io/cloud-builders/docker'
+  #   id: 'Build Aggregator'
+  #   dir: 'aggregator'
+  #   args: ['build', '-t', 'gcr.io/${PROJECT_ID}/aggregator:latest', '.']
+
+  # - name: 'gcr.io/cloud-builders/docker'
+  #   id: 'Build Dispatcher'
+  #   dir: 'dispatcher'
+  #   args: ['build', '-t', 'gcr.io/${PROJECT_ID}/dispatcher:latest', '.']
+
+images:
+  - 'gcr.io/${PROJECT_ID}/processor:latest'
+  - 'gcr.io/${PROJECT_ID}/media-processor:latest'
+  - 'gcr.io/${PROJECT_ID}/splitter:latest'
+  # - 'gcr.io/${PROJECT_ID}/aggregator:latest'
+  # - 'gcr.io/${PROJECT_ID}/dispatcher:latest'
