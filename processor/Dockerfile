@@ -1,41 +1,31 @@
-# Dockerfile
-
-# ---- Base ----
-# Use a specific version of node:20-alpine for reproducibility
-FROM node:20-alpine AS base
-WORKDIR /usr/src/app
-
-# ---- Dependencies ----
-# Use a dedicated layer for dependencies to leverage Docker's caching.
-# This layer is only rebuilt when package.json or package-lock.json changes.
-FROM base AS deps
+# Stage 1: Install dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# ---- Builder ----
-# This stage builds the TypeScript code into JavaScript.
-FROM deps AS builder
+# Stage 2: Build the TypeScript code
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# This is where we copy the prompts folder
+COPY ./prompts ./prompts
 RUN npm run build
 
-# ---- Production ----
-# This is the final, lean image that will be deployed.
-FROM base AS production
+# Stage 3: Production image - FINAL
+FROM node:20-alpine AS production
+WORKDIR /app
 ENV NODE_ENV=production
 
-# Copy package files and install only production dependencies.
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+# Copy the necessary compiled code, dependencies, AND prompts
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prompts ./prompts
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json .
 
-# Copy the compiled application code from the 'builder' stage.
-COPY --from=builder /usr/src/app/dist ./dist
-
-# Create a non-root user for security
+# Run as a non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-# Expose the port the app runs on
-EXPOSE 3000
-
-# The command to run the application
 CMD ["node", "dist/index.js"]

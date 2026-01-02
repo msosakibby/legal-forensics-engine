@@ -71,7 +71,7 @@ app.post('/trigger-splitter', async (req, res) => {
             containerOverrides: [{
                 env: [
                     { name: "INPUT_BUCKET", value: bucket },
-                    { name: "INPUT_FILE", value: name }
+                    { name: "FILE_NAME", value: name }
                 ]
             }]
         }

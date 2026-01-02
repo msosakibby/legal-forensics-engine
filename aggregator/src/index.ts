@@ -19,7 +19,7 @@ const vertexAI = new VertexAI({
 // --- PROMPTS FOR SUMMARIZATION ---
 const PROMPTS = {
     LANE_A: `You are a personal finance assistant. Summarize the attached statement... [rest of your detailed prompt]`,
-    LANE_C: `You are a personal finance assistant. Analyze and summarize my check register... [rest of your detailed prompt]`
+    LANE_C: `You are a personal finance assistant. Analyze and summarize my handwritten check registers. I need them presented in markdown table format. Date, Check Number, Payee, Description, Debit Amount, Credit Amount, Balance`
 };
 
 /**
@@ -34,7 +34,7 @@ async function generateAndSaveSummary(
 ) {
   console.log(`Generating document summary for ${baseName}...`);
   
-  const proModel = vertexAI.preview.getGenerativeModel({ model: 'gemini-1.5-pro' });
+  const proModel = vertexAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
   const summaryRes = await proModel.generateContent(prompt + '\n\n' + content);
   const summaryText = summaryRes.response.candidates?.[0]?.content?.parts?.[0]?.text || "Summary could not be generated.";
 
@@ -107,13 +107,28 @@ async function main() {
         await generateAndSaveSummary(PROMPTS.LANE_C, fullMarkdownTranscript, finalBaseName, config.runtime.archiveBucket!, originalPdfBuffer);
     }
 
-    // 4. PERFORM FINAL AGGREGATION (Your existing logic)
-    // ... [Your existing logic for creating the final PDF with attachments, sidecars, and Vector Store sync would go here] ...
+    // 4. MOVE ORIGINAL FILE TO ARCHIVE
+    const sourceFile = storage.bucket(config.runtime.inputBucket!).file(docRecord.filename);
+    const destinationFile = storage.bucket(config.runtime.archiveBucket!).file(`${folderName}/${docRecord.filename}`);
+    await sourceFile.move(destinationFile);
+    console.log(`Successfully moved original file to ${destinationFile.name}`);
+
+    // 5. CLEAN UP PROCESSING BUCKET
+    console.log(`Cleaning up processing files for docId: ${docId}`);
+    const [processingFiles] = await storage.bucket(config.runtime.processingBucket!).getFiles({ prefix: `${docId}/` });
+    const deletePromises = processingFiles.map(file => file.delete());
+    await Promise.all(deletePromises);
+    console.log(`Deleted ${processingFiles.length} processing files.`);
     
-    // Finalize DB
+    // 6. FINALIZE DATABASE RECORD
     await supabase
       .from('documents')
-      .update({ status: 'archived_with_summary' })
+      .update({ 
+        status: 'archived_with_summary',
+        gcs_archive_path: destinationFile.name,
+        // You could also add the summary text itself to the record here
+        // summary: summaryText 
+      })
       .eq('id', docId);
 
     console.log(`Successfully archived and summarized: ${folderName}`);
@@ -125,4 +140,4 @@ async function main() {
   }
 }
 
-main();cd 
+main();

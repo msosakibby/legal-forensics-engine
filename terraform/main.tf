@@ -1,4 +1,4 @@
-aterraform {
+terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -23,6 +23,12 @@ variable "gcp_region" {
   description = "The GCP region for the resources."
   type        = string
   default     = "us-central1"
+}
+
+variable "image_tag" {
+  description = "The Docker image tag to deploy, typically the git commit SHA."
+  type        = string
+  default     = "latest"
 }
 
 # --- API & SERVICE ENABLEMENT ---
@@ -112,7 +118,7 @@ resource "google_cloud_run_v2_job" "splitter" {
     template {
       service_account = google_service_account.forensics_sa.email
       containers {
-        image = "gcr.io/${var.gcp_project_id}/splitter:latest"
+        image = "gcr.io/${var.gcp_project_id}/splitter:${var.image_tag}"
         
         env { 
           name  = "INPUT_BUCKET" 
@@ -163,7 +169,7 @@ resource "google_cloud_run_v2_job" "processor" {
       timeout = "3600s"
       
       containers {
-        image = "gcr.io/${var.gcp_project_id}/processor:latest"
+        image = "gcr.io/${var.gcp_project_id}/processor:${var.image_tag}"
 
         env {
           name  = "GOOGLE_CLOUD_PROJECT"
@@ -225,7 +231,16 @@ resource "google_cloud_run_v2_job" "aggregator" {
     template {
       service_account = google_service_account.forensics_sa.email
       containers {
-        image = "gcr.io/${var.gcp_project_id}/aggregator:latest"
+        image = "gcr.io/${var.gcp_project_id}/aggregator:${var.image_tag}"
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.gcp_project_id
+        }
+        env {
+          name  = "REGION"
+          value = var.gcp_region
+        }
 
         env { 
           name  = "INPUT_BUCKET"
@@ -294,7 +309,7 @@ resource "google_cloud_run_v2_job" "media_processor" {
       timeout = "3600s" 
       
       containers {
-        image = "gcr.io/${var.gcp_project_id}/media-processor:latest"
+        image = "gcr.io/${var.gcp_project_id}/media-processor:${var.image_tag}"
         
         resources {
           limits = {
@@ -353,7 +368,7 @@ resource "google_cloud_run_v2_service" "dispatcher" {
 
   template {
     containers {
-      image = "gcr.io/${var.gcp_project_id}/dispatcher:latest"
+      image = "gcr.io/${var.gcp_project_id}/dispatcher:${var.image_tag}"
       
       env { 
         name  = "SPLITTER_JOB_NAME" 

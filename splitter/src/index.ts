@@ -32,7 +32,8 @@ async function main() {
   const { data: docData, error: docError } = await supabase
     .from('documents')
     .insert({
-      gcs_input_path: FILE_NAME,
+      gcs_path: FILE_NAME, // FIX: Use the correct column name for the input file path.
+      filename: FILE_NAME, // FIX: Satisfy the not-null constraint on the 'filename' column.
       status: 'splitting',
     })
     .select()

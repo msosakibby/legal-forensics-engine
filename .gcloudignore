@@ -1,0 +1,18 @@
+.gcloudignore
+.git
+.gitignore
+
+# Ignore dependencies (they are installed fresh in the build step)
+node_modules/
+*/node_modules/
+
+# Ignore build artifacts
+dist/
+*/dist/
+
+# Ignore local config, logs, and temp files
+.env
+*.log
+.DS_Store
+downloads/
+terraform/
