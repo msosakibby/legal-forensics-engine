@@ -16,54 +16,46 @@ JOB_AGGREGATOR="lfe-aggregator"
 JOB_MEDIA="lfe-media-processor"
 SERVICE_DISPATCHER="lfe-dispatcher"
 
-# --- BUCKET NAMES (CORRECTED PATTERN) ---
-# Previous: lfe-input-$PROJECT_ID
-# Corrected: $PROJECT_ID-input
-INPUT_BUCKET="${PROJECT_ID}-input"
-PROCESSING_BUCKET="${PROJECT_ID}-processing"
-ARCHIVE_BUCKET="${PROJECT_ID}-archive"
-
 echo "🚀 DEPLOYING TO PROJECT: $PROJECT_ID ($REGION)"
-echo "   • Input Bucket:      $INPUT_BUCKET"
-echo "   • Processing Bucket: $PROCESSING_BUCKET"
-echo "   • Archive Bucket:    $ARCHIVE_BUCKET"
 
-# 1. Create Artifact Registry (Idempotent)
+# 1. Enable Services (First run only)
+# gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
+
+# 2. Create Artifact Registry Repo (if not exists)
 if ! gcloud artifacts repositories describe $REPO_NAME --location=$REGION > /dev/null 2>&1; then
     echo "Creating Artifact Registry Repository..."
     gcloud artifacts repositories create $REPO_NAME --repository-format=docker --location=$REGION
 fi
 
-# 2. Build & Push Image
+# 3. Build & Push Image
 echo "📦 Building and Pushing Docker Image..."
 gcloud builds submit --tag $IMAGE_URI .
 
-# 3. Deploy Cloud Run Jobs
+# 4. Deploy Cloud Run Jobs
 
-# --- SPLITTER ---
 echo "⚙️  Deploying Splitter Job..."
 gcloud run jobs deploy $JOB_SPLITTER \
   --image $IMAGE_URI \
   --region $REGION \
   --command "node" \
   --args "dist/splitter/src/index.js" \
-  --max-retries 0 \
+  --set-env-vars "TOPIC_NAME=page-processing-topic" \
+  --set-env-vars "PROCESSING_BUCKET=lfe-processing-$PROJECT_ID" \
   --set-env-vars "REGION=$REGION" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
   --set-secrets="SUPABASE_URL=supabase-url:latest" \
-  --set-secrets="SUPABASE_KEY=supabase-key:latest"
-# Note: Bucket vars for Splitter are injected dynamically by Dispatcher, 
-# but we DO NOT set defaults here to avoid confusion.
+  --set-secrets="SUPABASE_KEY=supabase-key:latest" \
+  --max-retries 0
 
-# --- PROCESSOR ---
+
 echo "⚙️  Deploying Processor Job (Forensic Edition)..."
 gcloud run jobs deploy $JOB_PROCESSOR \
   --image $IMAGE_URI \
   --region $REGION \
   --command "node" \
-  --args "dist/processor/src/index.js" \
-  --memory 4Gi \
-  --cpu 2 \
+  --args "dist/index.js" \
+  --memory 4Gi \  # Increased for complex PDF parsing
+  --cpu 2 \       # Increased for LlamaParse/Vision concurrency
   --max-retries 3 \
   --set-env-vars "REGION=$REGION" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
@@ -71,7 +63,6 @@ gcloud run jobs deploy $JOB_PROCESSOR \
   --set-secrets="SUPABASE_KEY=supabase-key:latest" \
   --set-secrets="LLAMA_CLOUD_API_KEY=llama-cloud-api-key:latest"
 
-# --- AGGREGATOR ---
 echo "⚙️  Deploying Aggregator Job..."
 gcloud run jobs deploy $JOB_AGGREGATOR \
   --image $IMAGE_URI \
@@ -85,7 +76,7 @@ gcloud run jobs deploy $JOB_AGGREGATOR \
   --set-secrets="SUPABASE_URL=supabase-url:latest" \
   --set-secrets="SUPABASE_KEY=supabase-key:latest"
 
-# --- DISPATCHER ---
+# 5. Deploy Dispatcher Service
 echo "📡 Deploying Dispatcher Service..."
 gcloud run deploy $SERVICE_DISPATCHER \
   --image $IMAGE_URI \
@@ -97,11 +88,11 @@ gcloud run deploy $SERVICE_DISPATCHER \
   --set-env-vars "AGGREGATOR_JOB_NAME=$JOB_AGGREGATOR" \
   --set-env-vars "MEDIA_PROCESSOR_JOB_NAME=$JOB_MEDIA" \
   --set-env-vars "REGION=$REGION" \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
+  --set-env-vars "INPUT_BUCKET=lfe-input-$PROJECT_ID" \
+  --set-env-vars "PROCESSING_BUCKET=lfe-processing-$PROJECT_ID" \
+  --set-env-vars "ARCHIVE_BUCKET=lfe-archive-$PROJECT_ID" \
   --set-env-vars "TOPIC_NAME=page-processing-topic" \
-  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
-  --set-env-vars "PROCESSING_BUCKET=$PROCESSING_BUCKET" \
-  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
   --set-secrets="SUPABASE_URL=supabase-url:latest" \
   --set-secrets="SUPABASE_KEY=supabase-key:latest" \
   --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
