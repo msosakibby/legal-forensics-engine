@@ -2,7 +2,6 @@ import { Storage } from '@google-cloud/storage';
 import { PubSub } from '@google-cloud/pubsub';
 import { createClient } from '@supabase/supabase-js';
 import { VertexAI } from '@google-cloud/vertexai';
-import type { Part } from '@google-cloud/vertexai';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
 import { LlamaParseReader } from 'llamaindex';
 import fs from 'fs/promises';
@@ -10,568 +9,300 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 
-// ESM-compatible equivalent of __dirname for robust path resolution
+// Load Forensic Configuration
+import promptConfig from '../prompts/forensic_prompts.json' with { type: 'json' };
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ============================================================================
-// 1. CONFIGURATION & CLIENTS
-// ============================================================================
+// --- 1. INITIALIZATION ---
 const storage = new Storage();
 const pubsub = new PubSub();
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
 const vertexAI = new VertexAI({ project: process.env.GOOGLE_CLOUD_PROJECT!, location: process.env.REGION! });
 const visionClient = new ImageAnnotatorClient();
 
-const dataDictionary = JSON.parse(
-  await fs.readFile(path.join(__dirname, '../prompts/document_metadata.json'), 'utf-8')
-);
+// Models
+const fastModel = vertexAI.getGenerativeModel({ 
+  model: promptConfig.system_settings.model_standard,
+  generationConfig: { responseMimeType: 'application/json' }
+});
+const reasoningModel = vertexAI.getGenerativeModel({ 
+  model: promptConfig.system_settings.model_reasoning,
+  generationConfig: { responseMimeType: 'application/json' }
+});
 
-// ============================================================================
-// 2. HELPER FUNCTIONS
-// ============================================================================
+// --- 2. FORENSIC HELPER FUNCTIONS ---
 
-/** Structured Logging Helper for Cloud Run */
-function log(message: string, severity: 'INFO' | 'WARNING' | 'ERROR' = 'INFO', meta: Record<string, any> = {}) {
-  console.log(JSON.stringify({
-    severity,
-    message,
-    component: 'processor',
-    docId: process.env.DOC_ID,
-    ...meta
-  }));
-}
-
-/** Helper to safely get values from AI JSON output (Case Insensitive) */
-function safeGet(data: any, key: string): any {
-  if (!data) return null;
-  // Direct match
-  if (data[key] !== undefined) return data[key];
-  // Case-insensitive match
-  const found = Object.keys(data).find(k => k.toLowerCase() === key.toLowerCase());
-  return found ? data[found] : null;
-}
-
-/** Helper to retry async functions with exponential backoff */
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  retries: number = 3,
-  delay: number = 1000
-): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (retries === 0) throw error; 
-    log(`API call failed. Retrying in ${delay}ms...`, 'WARNING', { retriesLeft: retries, error: (error as Error).message });
-    await new Promise(resolve => setTimeout(resolve, delay));
+async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  try { return await fn(); } 
+  catch (e) {
+    if (retries === 0) throw e;
+    console.warn(`Retrying... ${retries} attempts left.`);
+    await new Promise(r => setTimeout(r, delay));
     return retryWithBackoff(fn, retries - 1, delay * 2);
   }
 }
 
-/** Helper to create a valid Part object for the Vertex AI SDK */
-const fileToPart = (fileBuffer: Buffer, mimeType: string): Part => {
-  return {
-    inlineData: {
-      mimeType,
-      data: fileBuffer.toString("base64"),
-    },
-  };
-};
-
-/** Generate Markdown using LlamaParse */
-async function generateMarkdown(filePath: string): Promise<string> {
-  log('Generating Layout-Aware Markdown (LlamaParse)...');
-  const reader = new LlamaParseReader({ apiKey: process.env.LLAMA_CLOUD_API_KEY! });
-  const documents = await reader.loadData(filePath);
-  return documents.map((doc) => doc.text).join('\n\n---\n\n');
-}
-
-/** Extract text using Google Cloud Vision (OCR) for handwriting */
-async function extractTextWithVision(fileBuffer: Buffer): Promise<string> {
-  log('Extracting text via Google Cloud Vision API...');
-  const [result] = await visionClient.documentTextDetection(fileBuffer);
-  return result.fullTextAnnotation?.text || '';
-}
-
-/** Classify document using Gemini Flash (Visual) */
-async function classifyWithAI(fileBuffer: Buffer, dataDictionary: any[]): Promise<string> {
-  log('Classifying via AI (Gemini 1.5 Flash)...');
-  const model = vertexAI.getGenerativeModel({
-    model: 'gemini-1.5-flash-001',
-    generationConfig: { responseMimeType: 'application/json' }
-  });
+/** Math Verification: Validates Ledger Integrity (Balance = Prev + Amount) */
+function verifyMath(lines: any[]): number[] {
+  const failedIndices: number[] = [];
+  if (!lines || lines.length < 2) return [];
   
-  // Sort options to put Check Registers last to subtly influence priority
-  const sortedDictionary = [...dataDictionary].sort((a, b) => {
-    if (a.subCategory.includes("Check Register")) return 1;
-    if (b.subCategory.includes("Check Register")) return -1;
-    return 0;
-  });
-
-  const options = sortedDictionary.map((d: any) => `'${d.subCategory}'`).join(' | ');
-  
-  // FIX: Explicitly type the parts array
-  const parts: Part[] = [
-    fileToPart(fileBuffer, 'application/pdf'),
-    { text: `Classify this document. 
-Options: ${options}
-
-CRITICAL INSTRUCTIONS (IN ORDER OF PRIORITY):
-1.  **Financial Planner Letters**: If the document is a typed letter, correspondence, or meeting summary, especially from a financial advisor, classify it as 'Financial Planner Letters'. This takes precedence even if it contains tables or transaction data.
-2.  **Legal Contracts & Agreements**: If the document is a Prenuptial Agreement, Divorce Decree, Court Judgment, or other formal legal contract, classify it as 'Legal Contracts & Agreements'.
-3.  **Tax Returns & Forms**: If the document is an official tax form (e.g., 1040, 1099, W-2), classify it as 'Tax Returns & Forms (Federal/State)'.
-4.  **Bank Statements**: If the document is a standard bank or credit card statement, classify it as 'Bank Statements & Credit Card Statements'.
-5.  **Handwritten Check Registers**: ONLY if the document's primary content is a HANDWRITTEN grid or ledger for tracking checks and transactions, classify it as 'Handwritten Check Registers'. Do NOT use this for typed letters or statements.
-6.  **Receipts**: If it is a point-of-sale receipt or a simple invoice, classify it as 'Invoices, Bills, & Receipts'.
-
-Return JSON: { "docType": "string", "reasoning": "string" }` }
-  ];
-
-  const res = await retryWithBackoff(() => model.generateContent({ contents: [{ role: 'user', parts }] }));
-  const json = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || '{}');
-  return json.docType || 'Unknown';
-}
-
-/** Build Schema Prompt from Dictionary */
-function getSchemaPrompt(docType: string, dataDictionary: any[]): { prompt: string, schema: string } {
-  const def = dataDictionary.find((d: any) => d.subCategory === docType);
-  if (!def) return { prompt: "Extract key-value pairs.", schema: "{}" };
-  
-  const fields = def.fields.map((f: any) => `"${f.name}": "${f.type}" // ${f.context}`).join(',\n');
-  return { 
-    prompt: `Forensic Extraction. Strict JSON. Schema:\n{\n${fields}\n}`, 
-    schema: `{\n${fields}\n}` 
-  };
-}
-
-/** Fetch Prenup Context from the most recent Prenuptial Agreement document */
-async function getPrenupContext(): Promise<string> {
-  try {
-    // 1. Find the most recent Prenup
-    const { data: docs } = await supabase
-      .from('documents')
-      .select('id')
-      .eq('doc_type', 'Legal Contracts & Agreements')
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    if (!docs || docs.length === 0) return "";
-    const docId = docs[0].id;
-
-    // 2. Get the markdown content from the first page
-    const { data: pages } = await supabase
-      .from('pages')
-      .select('gcs_markdown_path')
-      .eq('doc_id', docId)
-      .order('page_index')
-      .limit(1);
-
-    if (!pages || pages.length === 0 || !pages[0].gcs_markdown_path) return "";
-
-    // 3. Download the text
-    const bucket = process.env.PROCESSING_BUCKET!;
-    const [buffer] = await storage.bucket(bucket).file(pages[0].gcs_markdown_path).download();
-    return buffer.toString().substring(0, 15000); // Limit context to ~15k chars
-  } catch (error) {
-    log(`Warning: Could not fetch Prenup context: ${(error as Error).message}`, 'WARNING');
-    return "";
+  // Sort by date/index just in case
+  // Assuming strict order from extraction
+  for (let i = 1; i < lines.length; i++) {
+    const prev = lines[i-1];
+    const curr = lines[i];
+    
+    if (prev.balance != null && curr.balance != null && curr.amount != null) {
+      // Logic: Previous Balance + Amount = Current Balance?
+      // Use 0.05 tolerance for floating point drift
+      const expected = parseFloat(prev.balance) + parseFloat(curr.amount);
+      const actual = parseFloat(curr.balance);
+      
+      if (Math.abs(expected - actual) > 0.05) {
+        failedIndices.push(i);
+      }
+    }
   }
+  return failedIndices;
 }
 
-// ============================================================================
-// 3. MAIN PROCESSOR LOGIC
-// ============================================================================
+/** Legal Cross-Reference: Fetches the 'Rules' from the most recent Prenup */
+async function getPrenupContext(): Promise<string> {
+  const { data } = await supabase.from('legal_documents')
+    .select('restrictions, financial_obligations')
+    .eq('document_type', 'Prenuptial Agreement')
+    .order('created_at', { ascending: false })
+    .limit(1);
+    
+  if (!data || data.length === 0) return "NO ACTIVE RESTRICTIONS FOUND.";
+  return JSON.stringify(data[0]);
+}
+
+/** Visual Classification using Gemini Flash (Fast & Cheap) */
+async function classifyDocument(fileBuffer: Buffer): Promise<string> {
+  const pdfPart = { inlineData: { mimeType: 'application/pdf', data: fileBuffer.toString('base64') }};
+  const prompt = promptConfig.prompts.classification.template;
+  
+  const res = await retryWithBackoff(() => fastModel.generateContent({ 
+    contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+  }));
+  
+  const json = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+  return json.docType || "Unknown";
+}
+
+// --- 3. MAIN LOGIC ---
 async function main() {
   const { BUCKET, FILE, DOC_ID, PAGE_INDEX } = process.env;
   if (!BUCKET || !FILE || !DOC_ID || !PAGE_INDEX) throw new Error("Missing Env Vars");
 
   try {
-    log(`>>> Processing Started: ${FILE}`, 'INFO', { file: FILE, pageIndex: PAGE_INDEX });
+    console.log(`>>> Processing: ${FILE} (Page ${PAGE_INDEX})`);
 
-    // --- STEP A: DOWNLOAD ---
+    // A. DOWNLOAD
     const [fileBuffer] = await storage.bucket(BUCKET).file(FILE).download();
-    const tempPath = path.join(os.tmpdir(), `temp_${path.basename(FILE)}`);
+    const tempPath = path.join(os.tmpdir(), `proc_${path.basename(FILE)}`);
     await fs.writeFile(tempPath, fileBuffer);
+    const pdfPart = { inlineData: { mimeType: 'application/pdf', data: fileBuffer.toString('base64') }};
 
-    // --- STEP B: CLASSIFICATION (Visual First) ---
-    let docType = await classifyWithAI(fileBuffer, dataDictionary);
-    log(`Lane Identified (AI Vision): ${docType}`, 'INFO', { method: 'ai' });
+    // B. CLASSIFY (Lane Selection)
+    const docType = await classifyDocument(fileBuffer);
+    console.log(`Lane Identified: ${docType}`);
 
-    // --- STEP C: NORMALIZE & PERSIST METADATA ---
-    if (docType === "Handwritten Check Registers") docType = "Check Registers & Ledgers";
-    if (docType === "Financial Planner Letter") docType = "Financial Planner Letters";
-
+    // Update Master Record (First Page Only)
     if (PAGE_INDEX === '0') {
-      await supabase.from('documents').update({ doc_type: docType }).eq('id', DOC_ID);
+      await supabase.from('documents').update({ doc_type: docType, processing_lane: docType }).eq('id', DOC_ID);
     }
 
-    // --- STEP D: EXECUTE LANE WORKFLOW ---
-    // We now branch explicitly. We do NOT generate markdown globally anymore.
-    // Each lane decides its own extraction method (OCR vs LlamaParse).
-    
-    const proModel = vertexAI.getGenerativeModel({
-      model: 'gemini-3-pro-preview', 
-      generationConfig: { responseMimeType: 'application/json' }
-    });
-
+    // C. LANE EXECUTION
     let extractedData: any = {};
-    let markdown = ""; // Will be populated if the lane uses LlamaParse
-    const pdfPart = fileToPart(fileBuffer, 'application/pdf');
+    let markdown = ""; 
+    let targetTable = "";
 
-    // === LANE LOGIC ===
-    
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 2: FINANCIAL PLANNER LETTERS (Divorce Specialist)
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    if (docType === "Financial Planner Letters" || docType === "Financial Planner Letter") {
-      log(">>> Executing Lane: Financial Planner Letters");
+    // --- LANE 1: LEGAL CONTRACTS (High Precision Hybrid) ---
+    if (docType === "Legal Contracts & Agreements") {
+      targetTable = 'legal_documents';
+      
+      // 1. Text Extraction (LlamaParse for layout preservation)
+      const reader = new LlamaParseReader({ apiKey: process.env.LLAMA_CLOUD_API_KEY! });
+      const docs = await reader.loadData(tempPath);
+      markdown = docs.map(d => d.text).join('\n\n');
 
-      // 1. Extraction: LlamaParse (Best for letter layout/paragraphs)
-      markdown = await generateMarkdown(tempPath);
-
-      // 2. Analysis Prompt (User Provided)
-      const PLANNER_PROMPT = `
-You are an expert Forensic Accountant who specializes in Divorces. Analyze each letter and for both individuals or legal entities, provide detailed recommendation made by financial planner, any changes made or planned to be made, use those details to make observations of how portfolio allocation changes may benefit or negatively impact the other persons financial portfolio (both long and short term). Please make sure you all analysis is clear on what is owned individually by each, where there is a commingling of assets. Additionally, provide observations to all comments and recommendations with respect to any Trust. Make sure those observations include whether the changes have any real merit and how they could be used to positively benefit the other spouse.
-
-Also extract metadata: Date, Organization (Sender Company), Author (Sender Person), Recipients.
-
-CRITICAL: RETURN ONLY JSON. NO CONVERSATIONAL TEXT.
-OUTPUT MUST BE VALID JSON:
-{
-  "Letter Date": "YYYY-MM-DD",
-  "Organization": "string",
-  "Author Name": "string",
-  "Recipients": "string",
-  "Subject": "string",
-  "Forensic Analysis": {
-     "Recommendations": "string",
-     "Portfolio Impact": "string",
-     "Commingling Observations": "string",
-     "Trust Observations": "string",
-     "Spousal Benefit Analysis": "string",
-     "Prenup Compliance": "string"
-  }
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `${PLANNER_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
+      // 2. Expert Analysis (Gemini Pro)
+      const prompt = promptConfig.prompts.legal_analysis.template;
+      const res = await retryWithBackoff(() => reasoningModel.generateContent({ 
+        contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+      }));
       extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
 
       // 3. Persist
-      await supabase.from('financial_correspondence').insert({
+      await supabase.from(targetTable).insert({
         doc_id: DOC_ID,
-        letter_date: safeGet(extractedData, "Letter Date"),
-        addressee_name: safeGet(extractedData, "Recipients"),
-        addressor_name: safeGet(extractedData, "Organization"),
-        subject: safeGet(extractedData, "Subject"),
-        analysis_data: extractedData["Forensic Analysis"]
+        document_type: extractedData["Document Type"],
+        effective_date: extractedData["Effective Date"],
+        parties: extractedData["Parties"],
+        financial_obligations: extractedData["Obligations"],
+        restrictions: extractedData["Restrictions"],
+        risks: extractedData["Risks"],
+        timeline: extractedData["Timeline"]
       });
     }
 
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 3: TAX RETURNS (Forensic Tax)
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    else if (docType === "Tax Returns & Forms (Federal/State)") {
-      log(">>> Executing Lane: Tax Returns");
+    // --- LANE 2: FINANCIAL PLANNER (Cross-Reference) ---
+    else if (docType === "Financial Planner Letters") {
+      targetTable = 'financial_correspondence';
+      
+      // 1. Text Extraction
+      const reader = new LlamaParseReader({ apiKey: process.env.LLAMA_CLOUD_API_KEY! });
+      markdown = (await reader.loadData(tempPath)).map(d => d.text).join('\n');
 
-      // 1. Extraction: LlamaParse (Best for complex tables/forms)
-      markdown = await generateMarkdown(tempPath);
-
-      // 2. Analysis Prompt (User Provided)
-      const TAX_PROMPT = `
-You are Forensic Tax Accountant specializing in Divorces. Analyze all tax return documents as well as supporting input artifacts including all handwritten material. 
-For each individual and entity (I.e., sole proprietorship, LLC, Trust, etc.) I will want a break down of income, expenses, taxes owed by each, assets and asset depreciation. 
-Please pay special attention to the asset ownership and depreciation and movement of those between entities.
-
-OUTPUT MUST BE VALID JSON:
-{
-  "Tax Year": "YYYY",
-  "Form Number": "string",
-  "Jurisdiction": "Federal/State",
-  "Entity Name": "string",
-  "Total Income": "currency string",
-  "Tax Liability": "currency string",
-  "Depreciation Assets": [
-    { "Asset": "string", "Date Acquired": "string", "Depreciation Method": "string", "Current Value": "string" }
-  ],
-  "Forensic Breakdown": {
-     "Income Analysis": "string",
-     "Expense Analysis": "string",
-     "Asset Movement Observations": "string"
-  }
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `${TAX_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
+      // 2. Fetch Rules & Analyze
+      const rules = await getPrenupContext();
+      const prompt = promptConfig.prompts.financial_planner.template.replace('{{PRENUP_CONTEXT}}', rules);
+      
+      const res = await retryWithBackoff(() => reasoningModel.generateContent({ 
+        contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+      }));
       extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
 
-      // 3. Persist
-      await supabase.from('tax_documents').insert({
+      await supabase.from(targetTable).insert({
+        doc_id: DOC_ID,
+        letter_date: extractedData["Letter Date"],
+        addressor_name: extractedData["Organization"],
+        addressee_name: extractedData["Recipients"],
+        subject: extractedData["Subject"],
+        analysis_data: extractedData["Forensic Analysis"] // Contains 'Violations' array
+      });
+    }
+
+    // --- LANE 3: BANK STATEMENTS (Math Audit) ---
+    else if (docType === "Bank Statements & Credit Card Statements") {
+      targetTable = 'statement_lines';
+      const reader = new LlamaParseReader({ apiKey: process.env.LLAMA_CLOUD_API_KEY! });
+      markdown = (await reader.loadData(tempPath)).map(d => d.text).join('\n');
+
+      const prompt = promptConfig.prompts.bank_statement_math.template;
+      const res = await retryWithBackoff(() => reasoningModel.generateContent({ 
+        contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+      }));
+      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+
+      // Math Verification
+      if (extractedData.statement_lines) {
+        const failedIndices = verifyMath(extractedData.statement_lines);
+        
+        const rows = extractedData.statement_lines.map((line: any, index: number) => ({
+          doc_id: DOC_ID,
+          page_number: parseInt(PAGE_INDEX!),
+          account_number: extractedData["Account Number"],
+          date: line.date,
+          description: line.description,
+          amount: line.amount,
+          balance: line.balance,
+          is_math_verified: !failedIndices.includes(index) // Flag if math failed
+        }));
+        
+        if (rows.length > 0) await supabase.from(targetTable).insert(rows);
+      }
+    }
+
+    // --- LANE 4: CHECK REGISTERS (Handwriting) ---
+    else if (docType.includes("Check Register")) {
+      targetTable = 'evidence_logs';
+      
+      // 1. Use Vision API (Best for Handwriting)
+      const [result] = await visionClient.documentTextDetection(fileBuffer);
+      const ocrText = result.fullTextAnnotation?.text || '';
+      markdown = `[OCR TRANSCRIPT]\n${ocrText}`;
+
+      // 2. Reconstruct
+      const prompt = promptConfig.prompts.check_register.template.replace('{{OCR_TEXT}}', ocrText);
+      const res = await retryWithBackoff(() => reasoningModel.generateContent({ 
+        contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+      }));
+      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+
+      await supabase.from(targetTable).insert({
+        doc_id: DOC_ID,
+        log_type: 'check_register_reconstruction',
+        entities: extractedData.transactions,
+        content: `Entity: ${extractedData.register_summary?.entity}`
+      });
+    }
+
+    // --- LANE 5: TAX RETURNS ---
+    else if (docType.includes("Tax")) {
+      targetTable = 'tax_documents';
+      const reader = new LlamaParseReader({ apiKey: process.env.LLAMA_CLOUD_API_KEY! });
+      markdown = (await reader.loadData(tempPath)).map(d => d.text).join('\n');
+
+      const prompt = promptConfig.prompts.tax_return.template;
+      const res = await retryWithBackoff(() => reasoningModel.generateContent({ 
+        contents: [{ role: 'user', parts: [pdfPart, { text: prompt }] }] 
+      }));
+      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+
+      await supabase.from(targetTable).insert({
         doc_id: DOC_ID,
         tax_year: extractedData["Tax Year"],
-        jurisdiction: extractedData["Jurisdiction"],
-        form_number: extractedData["Form Number"],
-        entity_name: extractedData["Entity Name"],
+        form_number: extractedData["Form"],
+        entity_name: extractedData["Entity"],
         total_income: extractedData["Total Income"],
         tax_liability: extractedData["Tax Liability"],
-        depreciation_schedule: extractedData["Depreciation Assets"],
-        analysis_notes: extractedData["Forensic Breakdown"]
+        depreciation_schedule: extractedData["Depreciation"]
       });
     }
 
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 6: LEGAL CONTRACTS & AGREEMENTS (New Robust Lane)
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    else if (docType === "Legal Contracts & Agreements") {
-      log(">>> Executing Lane: Legal Contracts & Agreements");
-      markdown = await generateMarkdown(tempPath);
-
-      const LEGAL_PROMPT = `
-You are an expert Legal Forensic Analyst. Analyze this legal document (e.g., Prenuptial Agreement, Divorce Decree, Judgment, Contract).
-
-TASK:
-1. **Identify**: Determine the exact legal document type, the Jurisdiction, Case Number, and Effective Dates.
-2. **Parties**: Extract all parties involved and their roles.
-3. **Deep Analysis**:
-   - **Financial Obligations**: Extract all alimony, child support, asset division rules, debt responsibilities, and fee structures.
-   - **Restrictions & Covenants**: Identify non-compete clauses, non-disclosure agreements, spending limits, or restrictions on asset transfers.
-   - **Conditions & Triggers**: Identify clauses triggered by specific events (e.g., infidelity, sunset clauses, remarriage).
-   - **Judgments**: If a judgment, extract the final ruling and any penalties.
-
-CRITICAL: RETURN ONLY JSON. NO CONVERSATIONAL TEXT.
-OUTPUT MUST BE VALID JSON:
-{
-  "Document Type": "string",
-  "Document Date": "YYYY-MM-DD",
-  "Jurisdiction": "string",
-  "Case Number": "string",
-  "Parties": ["string"],
-  "Financial Obligations": [
-    { "Type": "string", "Amount": "string", "Details": "string", "Frequency": "string" }
-  ],
-  "Restrictions": [
-    { "Clause": "string", "Description": "string", "Impact": "string" }
-  ],
-  "Key Terms & Conditions": ["string"],
-  "Forensic Summary": "string"
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `${LEGAL_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
-      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
-
-      // Persist to legal_documents table (Assuming table exists, or use evidence_logs as fallback)
-      // Using a generic insert here, ensure table 'legal_documents' exists with 'analysis_data' JSONB column.
-      await supabase.from('legal_documents').insert({
-        doc_id: DOC_ID,
-        document_type: safeGet(extractedData, "Document Type"),
-        document_date: safeGet(extractedData, "Document Date"),
-        jurisdiction: safeGet(extractedData, "Jurisdiction"),
-        parties: safeGet(extractedData, "Parties"),
-        analysis_data: extractedData // Store full rich analysis
-      });
-    }
-
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 4: BANK STATEMENTS (Default Table Logic)
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    else if (docType === "Bank Statements & Credit Card Statements") {
-      log(">>> Executing Lane: Bank Statements");
-      markdown = await generateMarkdown(tempPath);
-
-      const STATEMENT_PROMPT = `
-Extract all statement lines into a structured JSON format.
-Capture: Date, Description, Amount, Balance (if available).
-Also extract the Statement Period and Account Number.
-
-OUTPUT JSON:
-{
-  "Statement Period": "string",
-  "Account Number": "string",
-  "statement_lines": [
-    { "date": "YYYY-MM-DD", "description": "string", "amount": number, "balance": number }
-  ]
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `${STATEMENT_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
-      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
-
-      if (Array.isArray(extractedData.statement_lines)) {
-        await supabase.from('statement_lines').insert(extractedData.statement_lines.map((r: any) => ({
-          doc_id: DOC_ID, page_number: parseInt(PAGE_INDEX), ...r
-        })));
-      }
-    } 
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 1: CHECK REGISTERS (Handwriting Focus)
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    else if (docType === "Check Registers & Ledgers" || docType === "Handwritten Check Registers") {
-      log("Running Forensic Register Analysis...");
-      log(">>> Executing Lane: Check Registers");
-      
-      // NEW: Enhance with Cloud Vision OCR for handwriting
-      // 1. Extraction: Cloud Vision (Best for handwriting)
-      const ocrText = await extractTextWithVision(fileBuffer);
-      markdown = `[OCR RAW TEXT]\n${ocrText}`; // Store OCR as the "markdown" for this type
-
-      const CHECK_REGISTER_PROMPT = `
-You are an expert Forensic Accountant. Digitize, reconstruct, and analyze this handwritten check register.
-
-TASK:
-1. **Reconstruct the Ledger**: Create a master chronological ledger. Handle non-linear entries (jumping dates). Infer years based on context.
-2. **Clean Data**: Split descriptions into Payee and Memo. Calculate running balances if missing or incorrect.
-3. **Analyze**: Identify patterns (Income sources, loans, family support).
-
-CRITICAL: RETURN ONLY JSON. NO CONVERSATIONAL TEXT.
-OUTPUT MUST BE VALID JSON:
-{
-  "register_summary": {
-    "entity_name": "Name of account holder/bank",
-    "period": "Start - End",
-    "analysis": "Brief forensic summary of findings"
-  },
-  "transactions": [
-    { "date": "MM/DD/YY", "code": "string", "payee": "string", "memo": "string", "payment": "currency string", "fee": "currency string", "deposit": "currency string", "balance": "currency string" }
-  ]
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `\n\nTRANSCRIPT:\n${ocrText}\n\n${CHECK_REGISTER_PROMPT}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
-      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
-
-      // NEW: Generate the clean Markdown Table for the report (Forensic Reconstruction)
-      if (extractedData.transactions && Array.isArray(extractedData.transactions)) {
-          const header = "| Date | Code | Transaction Description (Payee / Memo) | Payment (-) | Fee | Deposit (+) | Balance |\n| :--- | :--- | :--- | :--- | :--- | :--- | :--- |";
-          const rows = extractedData.transactions.map((t: any) => {
-              const desc = `**${t.payee || ""}**<br>_${t.memo || ""}_`;
-              return `| ${t.date || ""} | ${t.code || ""} | ${desc} | ${t.payment || ""} | ${t.fee || ""} | ${t.deposit || ""} | ${t.balance || ""} |`;
-          }).join('\n');
-          
-          const summary = extractedData.register_summary || {};
-          markdown = `### ${summary.entity_name || "Register"} - Master Chronological Register (${summary.period || "Unknown Period"})\n\n${header}\n${rows}`;
-      }
-      
-      // 3. Persist
-      await supabase.from('evidence_logs').insert({
-        doc_id: DOC_ID,
-        log_type: 'forensic_register_analysis',
-        content: JSON.stringify(extractedData.register_summary),
-        entities: extractedData.transactions
-      });
-    }
-
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // LANE 5: DEFAULT / RECEIPTS
-    // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    else {
-      log(`>>> Executing Lane: General/Receipts (${docType})`);
-      markdown = await generateMarkdown(tempPath);
-
-      const RECEIPT_PROMPT = `
-You are a forensic analyst. Extract all details from this receipt/invoice.
-
-EXTRACT:
-- Vendor Details: Name, Address, Phone.
-- Transaction Details: Date, Time, Store ID, Register ID, Cashier/Operator, Receipt ID.
-- Financials: Net Total (Subtotal), Tax Total, Gross Total (Final).
-- Tax Breakdown: Array of tax rates/amounts if present.
-- Payment: Method (Card/Cash), Card Last 4, Auth Code.
-- Line Items: Full list with Product Code, Description, Qty, Price.
-
-OUTPUT JSON:
-{
-  "Vendor Name": "string",
-  "Vendor Address": "string",
-  "Vendor Phone": "string",
-  "Transaction Date": "YYYY-MM-DD",
-  "Store ID": "string",
-  "Register ID": "string",
-  "Operator/Cashier": "string",
-  "Receipt ID": "string",
-  "Net Receipt Total": "currency string",
-  "Tax Receipt Total": "currency string",
-  "Gross Receipt Total": "string",
-  "Tax Breakdown": [{ "Locality": "string", "Rate": "string", "Amount": "string" }],
-  "Payment Information": { "Method": "string", "Card Last 4": "string", "Auth Code": "string" },
-  "Line Items": [
-    { "Description": "string", "Product Code": "string", "Qty": "string", "Unit Price": "string", "Line Total": "string" }
-  ]
-}`;
-
-      const parts: Part[] = [pdfPart, { text: `${RECEIPT_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-      const res = await retryWithBackoff(() => proModel.generateContent({ contents: [{ role: 'user', parts }] }));
-      extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
-      
-
-      if (docType === "Invoices, Bills, & Receipts") {
-        await supabase.from('receipts').insert({
-          doc_id: DOC_ID,
-          vendor: extractedData["Vendor Name"],
-          total_amount: extractedData["Gross Receipt Total"],
-          purchase_date: extractedData["Transaction Date"],
-          // Forensic Details
-          net_amount: extractedData["Net Receipt Total"],
-          tax_amount: extractedData["Tax Receipt Total"],
-          tax_breakdown: extractedData["Tax Breakdown"],
-          line_items: extractedData["Line Items"],
-          payment_info: extractedData["Payment Information"],
-          store_id: extractedData["Store ID"],
-          register_id: extractedData["Register ID"],
-          cashier: extractedData["Operator/Cashier"],
-          receipt_id: extractedData["Receipt ID"],
-          vendor_address: extractedData["Vendor Address"],
-          vendor_phone: extractedData["Vendor Phone"]
-        });
-      }
-    }
-
-    // --- STEP F: SAVE ARTIFACTS & COMPLETE ---
-    await fs.unlink(tempPath); // Cleanup
-
-    // --- STEP D: PERSIST METADATA (Page 0 Only) ---
-    if (PAGE_INDEX === '0') {
-      await supabase.from('documents').update({ doc_type: docType }).eq('id', DOC_ID);
-    }
-
-    // --- STEP D: SAVE ARTIFACTS & COMPLETE ---
+    // D. SAVE ARTIFACTS & FINALIZE
     extractedData._meta_doc_type = docType;
+    const baseName = `${FILE}`;
     
-    const mdName = `${FILE}.md`;
-    const jsonName = `${FILE}.json`;
-
     await Promise.all([
-      storage.bucket(BUCKET).file(mdName).save(markdown),
-      storage.bucket(BUCKET).file(jsonName).save(JSON.stringify(extractedData))
+      storage.bucket(BUCKET).file(`${baseName}.json`).save(JSON.stringify(extractedData)),
+      storage.bucket(BUCKET).file(`${baseName}.md`).save(markdown)
     ]);
 
     await supabase.from('pages').insert({
       doc_id: DOC_ID,
-      page_index: parseInt(PAGE_INDEX),
+      page_index: parseInt(PAGE_INDEX!),
       status: 'complete',
       extracted_data: extractedData,
-      gcs_markdown_path: mdName,
-      gcs_json_path: jsonName
+      gcs_json_path: `${baseName}.json`,
+      gcs_markdown_path: `${baseName}.md`
     });
 
-    log('Page Complete', 'INFO', { status: 'complete' });
+    console.log("Page Complete. Checking for Aggregation...");
     
-    // Trigger Aggregator
+    // Check if this was the last page
     const { count } = await supabase.from('pages').select('*', { count: 'exact', head: true }).eq('doc_id', DOC_ID).eq('status', 'complete');
     const { data: doc } = await supabase.from('documents').select('total_pages').eq('id', DOC_ID).single();
     
     if (doc && count === doc.total_pages) {
-      log('Triggering Aggregator', 'INFO', { totalPages: doc.total_pages });
+      console.log("Triggering Aggregator.");
       await pubsub.topic('document-ready-to-aggregate').publishMessage({ data: Buffer.from(JSON.stringify({ docId: DOC_ID })) });
     }
 
-  } catch (err) {
-    const error = err as Error;
-    log(`FATAL: ${error.message}`, 'ERROR', { stack: error.stack });
-    if (DOC_ID && PAGE_INDEX) {
-        await supabase.from('pages').insert({ doc_id: DOC_ID, page_index: parseInt(PAGE_INDEX), status: 'error', error_message: error.message });
+  } catch (err: any) {
+    console.error(`FATAL ERROR: ${err.message}`);
+    // Log error to DB
+    if (process.env.DOC_ID) {
+        await supabase.from('pages').insert({ 
+            doc_id: process.env.DOC_ID, 
+            page_index: parseInt(process.env.PAGE_INDEX || '0'), 
+            status: 'error', 
+            error_message: err.message 
+        });
     }
     process.exit(1);
+  } finally {
+    // Cleanup
+    if (process.env.FILE) {
+        try { await fs.unlink(path.join(os.tmpdir(), `proc_${path.basename(process.env.FILE)}`)); } catch {}
+    }
   }
 }
+
 main();

@@ -3,6 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 import { VertexAI } from '@google-cloud/vertexai';
 import { PDFDocument } from 'pdf-lib';
 import path from 'path';
+import os from 'os';
+import fs from 'fs/promises';
 
 // --- INITIALIZE CLIENTS ---
 const storage = new Storage();
@@ -12,313 +14,215 @@ const vertexAI = new VertexAI({
   location: process.env.REGION!
 });
 
-/**
- * Helper to retry async functions with exponential backoff
- */
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  retries: number = 3,
-  delay: number = 1000
-): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
+// --- HELPERS ---
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  try { return await fn(); } 
+  catch (error: any) {
     if (retries === 0) throw error;
-    console.warn(`API call failed. Retrying in ${delay}ms... (${retries} attempts left). Error: ${(error as Error).message}`);
+    console.warn(`API call failed. Retrying in ${delay}ms... Error: ${error.message}`);
     await new Promise(resolve => setTimeout(resolve, delay));
     return retryWithBackoff(fn, retries - 1, delay * 2);
   }
 }
 
 /**
- * Generates a summary for the entire document, saves it, and embeds it in a new PDF.
+ * Aggregates specific forensic findings from all pages into a consolidated summary block.
  */
-async function generateAndSaveSummary(
-  prompt: string | null,
-  content: string,
-  baseName: string,
-  bucketName: string,
-  originalPdfBuffer: Buffer,
-  preComputedSummary?: string
-) {
-  console.log(`Generating document summary for ${baseName}...`);
-  
-  let summaryText = preComputedSummary || "";
+function buildForensicHighlights(pages: any[], docType: string): string {
+  let highlights = "";
 
-  if (!summaryText && prompt) {
-      // Note: Ensure 'gemini-1.5-pro' is an available and enabled model in your GCP project to prevent runtime errors.
-      const proModel = vertexAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
-      const summaryRes = await retryWithBackoff(() => proModel.generateContent(prompt + '\n\n' + content));
-      summaryText = summaryRes.response.candidates?.[0]?.content?.parts?.[0]?.text || "Summary could not be generated.";
+  // --- LANE 1: LEGAL CONTRACTS ---
+  if (docType === "Legal Contracts & Agreements") {
+    let allRisks: any[] = [];
+    let timelineEvents: any[] = [];
+
+    pages.forEach(p => {
+      const d = p.extracted_data;
+      if (d?.Risks) allRisks.push(...d.Risks);
+      if (d?.Timeline) timelineEvents.push(...d.Timeline);
+    });
+
+    if (allRisks.length > 0) {
+      highlights += `## ⚠️ Legal Risk Assessment\n`;
+      // Filter for High/Medium risks
+      const highRisks = allRisks.filter((r: any) => r.Severity === 'High');
+      if (highRisks.length > 0) {
+        highlights += `### 🚨 CRITICAL RISKS DETECTED (${highRisks.length})\n`;
+        highRisks.forEach((r: any) => highlights += `- **${r.Risk}**: ${r.Reasoning}\n`);
+      }
+      highlights += `\n**Total Risks Identified:** ${allRisks.length}\n\n`;
+    }
+
+    if (timelineEvents.length > 0) {
+      highlights += `## 📅 Constructed Timeline\n`;
+      // Sort timeline by date
+      timelineEvents.sort((a: any, b: any) => new Date(a.Date).getTime() - new Date(b.Date).getTime());
+      timelineEvents.forEach((t: any) => highlights += `- **${t.Date}**: ${t.Event}\n`);
+      highlights += `\n`;
+    }
   }
 
-  const dsBaseName = `${baseName}_DS`; // DS for "Document Summary"
-  const folderName = baseName;
-  const summaryJson = JSON.stringify({ summary: summaryText });
+  // --- LANE 2: FINANCIAL PLANNER ---
+  else if (docType === "Financial Planner Letters") {
+    let allViolations: any[] = [];
+    pages.forEach(p => {
+      const d = p.extracted_data;
+      if (d?.["Forensic Analysis"]?.Violations) {
+        allViolations.push(...d["Forensic Analysis"].Violations);
+      }
+    });
 
-  // Save summary MD, Full Transcript MD, and JSON to Archive Bucket
-  await Promise.all([
-    storage.bucket(bucketName).file(`${folderName}/${dsBaseName}_Summary.md`).save(summaryText),
-    storage.bucket(bucketName).file(`${folderName}/${dsBaseName}_FullTranscript.md`).save(content),
-    storage.bucket(bucketName).file(`${folderName}/${dsBaseName}_Summary.json`).save(summaryJson),
-  ]);
-
-  // Create a new PDF with the summary and transcript embedded in its metadata
-  try {
-    const pdfDoc = await PDFDocument.load(originalPdfBuffer);
-    
-    // Embed data in PDF Metadata (Subject field is used for large text content)
-    const metadataContent = `SUMMARY:\n${summaryText}\n\n---\n\nMETADATA JSON:\n${summaryJson}\n\n---\n\nFULL TRANSCRIPT:\n${content}`;
-    
-    pdfDoc.setTitle(`Forensic Summary: ${baseName}`);
-    pdfDoc.setSubject(metadataContent);
-    pdfDoc.setKeywords(['Forensics', 'AI', 'Summary', 'Legal']);
-    pdfDoc.setProducer('Legal Forensics Engine');
-    pdfDoc.setCreator('Gemini 3 Pro (preview)');
-    pdfDoc.setCreationDate(new Date());
-    pdfDoc.setModificationDate(new Date());
-
-    const pdfBytes = await pdfDoc.save();
-    await storage.bucket(bucketName).file(`${folderName}/${dsBaseName}.pdf`).save(pdfBytes);
-    console.log(`Successfully saved summary assets to folder: ${folderName}`);
-  } catch (e) {
-    console.error(`Error updating PDF metadata for ${dsBaseName}:`, e);
+    if (allViolations.length > 0) {
+      highlights += `## 🚨 PRENUP COMPLIANCE ALERTS\n`;
+      highlights += `**Violations Detected:** ${allViolations.length}\n`;
+      allViolations.forEach((v: any) => {
+        highlights += `- **Clause:** ${v.Clause} | **Issue:** ${v.Violation}\n`;
+      });
+      highlights += `\n`;
+    }
   }
+
+  // --- LANE 3: BANK STATEMENTS ---
+  else if (docType === "Bank Statements & Credit Card Statements") {
+    let totalTrans = 0;
+    let failedMath = 0;
+    
+    pages.forEach(p => {
+      const lines = p.extracted_data?.statement_lines || [];
+      totalTrans += lines.length;
+      // Count rows where is_math_verified is explicit FALSE
+      failedMath += lines.filter((l: any) => l.is_math_verified === false).length;
+    });
+
+    highlights += `## 🧮 Forensic Math Audit\n`;
+    highlights += `- **Total Transactions:** ${totalTrans}\n`;
+    if (failedMath > 0) {
+      highlights += `- **🔴 CALCULATION MISMATCHES:** ${failedMath}\n`;
+      highlights += `> Warning: ${failedMath} running balances did not match the previous balance +/- transaction amount.\n`;
+    } else {
+      highlights += `- **Verification Status:** ✅ All running balances verified mathematically.\n`;
+    }
+    highlights += `\n`;
+  }
+
+  return highlights;
 }
 
+/**
+ * Main function to generate files and update DB
+ */
 async function main() {
-  console.log('Starting Aggregator Job (with Summarization)...');
-
+  console.log('Starting Aggregator Job...');
   const docId = process.env.DOC_ID;
-  if (!docId) throw new Error('Missing runtime configuration: docId');
+  if (!docId) throw new Error('Missing DOC_ID');
 
   try {
-    const { data: docRecord } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('id', docId)
-      .single();
-
+    // 1. FETCH DATA
+    const { data: docRecord } = await supabase.from('documents').select('*').eq('id', docId).single();
     if (!docRecord) throw new Error(`Document not found: ${docId}`);
 
     const { data: pages } = await supabase
       .from('pages')
-      .select('gcs_markdown_path, extracted_data, page_index')
+      .select('*')
       .eq('doc_id', docId)
       .order('page_index', { ascending: true });
 
     if (!pages || pages.length === 0) throw new Error('No processed pages found.');
 
-    console.log(`Aggregating ${pages.length} pages for ${docRecord.filename}...`);
+    console.log(`Aggregating ${pages.length} pages...`);
 
-    let finalBaseName = path.parse(docRecord.filename).name;
+    // 2. DETERMINE DOCTYPE & NAMING
+    // Prefer the AI-classified type from Page 0, fall back to DB default
+    const firstPageData = pages[0].extracted_data || {};
+    const docType = firstPageData._meta_doc_type || docRecord.doc_type || "Unknown Document";
     
-    // --- SMART RENAMING LOGIC ---
-    const firstPage = pages.find((p: any) => p.page_index == 0);
-    
-    if (firstPage?.extracted_data) {
-      let data = firstPage.extracted_data;
-      // Ensure data is an object if Supabase returns it as a string
-      if (typeof data === 'string') {
-        try { data = JSON.parse(data); } catch (e) { console.warn("Failed to parse extracted_data JSON"); }
-      }
-
-      const docType = data?._meta_doc_type || docRecord.doc_type;
-
-      // NEW: Case-insensitive getter for resilience against LLM output variations.
-      const getVal = (obj: any, ...keys: string[]): any => {
-        if (!obj) return undefined;
-        for (const key of keys) {
-            const realKey = Object.keys(obj).find(k => k.toLowerCase().trim() === key.toLowerCase());
-            if (realKey && obj[realKey]) {
-                return obj[realKey];
-            }
-        }
-        return undefined;
-      };
-
-      // Helper to sanitize strings for filenames
-      const sanitize = (s: any) => {
-        if (!s) return 'Unknown';
-        return String(s).trim().replace(/[\\/:"*?<>|]/g, '').replace(/\s+/g, ' ');
-      };
-
-      // Helper to format dates to YYYY-MM-DD
-      const formatDate = (d: any) => {
-        if (!d) return '0000-00-00';
-        const s = String(d).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-        const date = new Date(s);
-        if (!isNaN(date.getTime())) {
-            return date.toISOString().split('T')[0];
-        }
-        return sanitize(s);
-      };
-
-      let dateStr = '0000-00-00';
-      let typeStr = 'Document';
-      let sourceStr = 'Source';
-      let personStr = 'Person';
-      let customBaseName = "";
-
-      console.log(`Attempting smart rename for docType: "${docType}"`);
-
-      if (docType === 'Financial Planner Letters' || docType === 'Financial Planner Letter') {
-          dateStr = formatDate(getVal(data, "Letter Date"));
-          const org = sanitize(getVal(data, "Organization", "Addressor Name"));
-          const subject = sanitize(getVal(data, "Subject"));
-          const recipient = sanitize(getVal(data, "Recipients", "Addressee Name"));
-          
-          // Format: Date - Organization - Subject - Recipients
-          customBaseName = `${dateStr} - ${org} - ${subject} - ${recipient}`;
-      } else if (docType === 'Tax Returns & Forms (Federal/State)') {
-          dateStr = formatDate(getVal(data, "Tax Year"));
-          typeStr = sanitize(getVal(data, "Form Number") || "Tax Form");
-          sourceStr = sanitize(getVal(data, "Jurisdiction"));
-          personStr = sanitize(getVal(data, "Entity Name"));
-      } else if (docType === 'Invoices, Bills, & Receipts') {
-          dateStr = formatDate(getVal(data, "Transaction Date"));
-          typeStr = "Receipt";
-          sourceStr = sanitize(getVal(data, "Vendor Name"));
-          personStr = sanitize(getVal(data, "Operator/Cashier") || "Unknown");
-      } else if (docType === 'Bank Statements & Credit Card Statements') {
-          let d = getVal(data, "Statement Period");
-          if (d && typeof d === 'string' && d.includes(' to ')) d = d.split(' to ')[1];
-          dateStr = formatDate(d);
-          typeStr = "Statement";
-          sourceStr = sanitize(getVal(data, "Financial Institution"));
-          personStr = sanitize(getVal(data, "Account Number (Masked)"));
-      } else if (docType === 'Check Registers & Ledgers') {
-          // This logic is more stable as the prompt is hardcoded.
-          const summary = data.register_summary || {};
-          let d = summary.period;
-          if (d && typeof d === 'string' && d.includes(' - ')) d = d.split(' - ')[0];
-          dateStr = formatDate(d);
-          typeStr = "Check Register";
-          sourceStr = sanitize(summary.entity_name);
-          personStr = sanitize(summary.account_holder || "Account Holder");
-      } else {
-          // Improved Fallback
-          console.log("Using fallback renaming logic.");
-          dateStr = formatDate(getVal(data, "Transaction Date", "Statement Period", "Letter Date", "Tax Year"));
-          typeStr = sanitize(docType || "Document");
-          sourceStr = sanitize(getVal(data, "Vendor Name", "Vendor/Merchant Name", "Financial Institution", "Addressor Name", "Entity Name"));
-          personStr = sanitize(getVal(data, "Addressee Name", "Operator/Cashier"));
-      }
-      
-      finalBaseName = customBaseName || `${dateStr} - ${typeStr} - ${sourceStr} - ${personStr}`;
-      console.log(`Smart Renaming Applied: ${finalBaseName}`);
-    }
-
+    // Smart Naming - Simplified
+    let finalBaseName = path.parse(docRecord.filename).name; 
     const folderName = finalBaseName;
 
-    // 1. GATHER ALL MARKDOWN CONTENT
-    let fullMarkdownTranscript = `# Forensics Report: ${finalBaseName}\n\n`;
+    // 3. BUILD FORENSIC HIGHLIGHTS
+    console.log("Building Forensic Highlights...");
+    const forensicSummary = buildForensicHighlights(pages, docType);
+
+    // 4. COMPILE FULL TRANSCRIPT
+    let fullMarkdownTranscript = `# Forensic Report: ${finalBaseName}\n\n`;
+    fullMarkdownTranscript += `**Document Type:** ${docType}\n`;
+    fullMarkdownTranscript += `**Process Date:** ${new Date().toISOString()}\n\n`;
+    
+    if (forensicSummary) {
+      fullMarkdownTranscript += `---\n${forensicSummary}\n---\n\n`;
+    }
+
+    // Append page content
     for (const page of pages) {
-        if (page.gcs_markdown_path) {
-            const [mdBuffer] = await storage.bucket(process.env.PROCESSING_BUCKET!).file(page.gcs_markdown_path).download();
-            fullMarkdownTranscript += `## Page ${pages.indexOf(page) + 1}\n${mdBuffer.toString()}\n\n---\n\n`;
-        }
+      if (page.gcs_markdown_path) {
+        const [mdBuffer] = await storage.bucket(process.env.PROCESSING_BUCKET!).file(page.gcs_markdown_path).download();
+        fullMarkdownTranscript += `### Page ${page.page_index + 1}\n\n${mdBuffer.toString()}\n\n---\n\n`;
+      }
     }
+
+    // 5. GENERATE AI SUMMARY (If Forensic Highlights are thin)
+    // Only call AI if we didn't generate a robust forensic section
+    let finalSummaryText = forensicSummary;
+    if (!finalSummaryText || finalSummaryText.length < 50) {
+      console.log("Forensic highlights thin. Generating AI narrative summary...");
+      const proModel = vertexAI.getGenerativeModel({ model: 'gemini-1.5-pro-001' });
+      // Truncate to avoid context limit issues on large docs
+      const prompt = `Summarize this ${docType} document. Highlight key financial figures, dates, and obligations.\n\nTEXT:\n${fullMarkdownTranscript.substring(0, 30000)}`;
+      
+      const res = await retryWithBackoff(() => proModel.generateContent(prompt));
+      finalSummaryText = res.response.candidates?.[0]?.content?.parts?.[0]?.text || "Summary Unavailable";
+      
+      // Prepend to transcript
+      fullMarkdownTranscript = `# Executive Summary\n${finalSummaryText}\n\n` + fullMarkdownTranscript;
+    }
+
+    // 6. SAVE ARTIFACTS
+    const dsBaseName = `${finalBaseName}_Report`;
+    const summaryJson = JSON.stringify({ 
+      docType, 
+      summary: finalSummaryText, 
+      forensicData: forensicSummary 
+    });
+
+    const archiveBucket = storage.bucket(process.env.ARCHIVE_BUCKET!);
     
-    // 2. DOWNLOAD ORIGINAL PDF (Needed for summarization output and final archive)
+    await Promise.all([
+      archiveBucket.file(`${folderName}/${dsBaseName}.md`).save(fullMarkdownTranscript),
+      archiveBucket.file(`${folderName}/${dsBaseName}.json`).save(summaryJson)
+    ]);
+
+    // 7. EMBED SUMMARY INTO PDF METADATA
     const [originalPdfBuffer] = await storage.bucket(process.env.INPUT_BUCKET!).file(docRecord.filename).download();
-
-    // 3. **NEW**: ROUTE TO SUMMARIZATION LOGIC BASED ON DOC_TYPE
-    // Prefer the doc type from the extracted data as it's the most fresh
-    let docTypeForSummary = docRecord.doc_type;
-    if (firstPage?.extracted_data) {
-        let d = firstPage.extracted_data;
-        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) {} }
-        if (d && d._meta_doc_type) docTypeForSummary = d._meta_doc_type;
-    }
-    docTypeForSummary = docTypeForSummary || 'Unknown';
-    console.log(`Generating summary for DocType: ${docTypeForSummary}`);
-
-    // Check if we have rich analysis data from the processor to use instead of re-generating
-    let preComputedSummary = "";
-    if ((docTypeForSummary === 'Financial Planner Letters' || docTypeForSummary === 'Financial Planner Letter') && firstPage?.extracted_data) {
-        let d = firstPage.extracted_data;
-        if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) {} }
-        
-        // Use the Forensic Analysis structure
-        if (d && d["Forensic Analysis"]) {
-            const ad = d["Forensic Analysis"];
-            preComputedSummary = `### Forensic Analysis: Financial Planner Correspondence\n\n`;
-            if (ad.Recommendations) preComputedSummary += `#### Recommendations & Actions\n${ad.Recommendations}\n\n`;
-            if (ad["Portfolio Impact"]) preComputedSummary += `#### Portfolio Impact (Short & Long Term)\n${ad["Portfolio Impact"]}\n\n`;
-            if (ad["Commingling Observations"]) preComputedSummary += `#### Commingling Observations\n${ad["Commingling Observations"]}\n\n`;
-            if (ad["Trust Observations"]) preComputedSummary += `#### Trust Observations\n${ad["Trust Observations"]}\n\n`;
-            if (ad["Spousal Benefit Analysis"]) preComputedSummary += `#### Spousal Benefit Analysis\n${ad["Spousal Benefit Analysis"]}\n\n`;
-            
-            console.log("Using pre-computed forensic analysis for summary.");
-        }
-    }
-
-    let summaryPrompt = "";
-
-    if (preComputedSummary) {
-        // If we already have a good summary, we might just pass it through or skip generation.
-        // However, generateAndSaveSummary expects to call the AI. 
-        // Let's modify the flow to use this text directly if available.
-        await generateAndSaveSummary(null, fullMarkdownTranscript, finalBaseName, process.env.ARCHIVE_BUCKET!, originalPdfBuffer, preComputedSummary);
-    } else if (docTypeForSummary === 'Bank Statements & Credit Card Statements') {
-        summaryPrompt = `You are a forensic analyst. Summarize the key inflows, outflows, and any anomalous transactions from this bank statement.`;
-    } else if (docTypeForSummary === 'Check Registers & Ledgers') {
-        summaryPrompt = `
-You are a forensic accountant providing a final report on this check register.
-Based on the reconstructed ledger provided, generate a "Forensic Summary & Key Observations" report.
-
-Structure your response exactly as follows:
-### Forensic Summary & Key Observations
-**Entity:** [Entity Name from Ledger]
-**Period:** [Date Range from Ledger]
-
-#### 1. Entity Function & Operational Pattern
-#### 2. Private Lending Ledger
-#### 3. Family Support & Expenses
-#### 4. Real Estate & Asset Maintenance`;
-    } else if (docTypeForSummary === 'Financial Planner Letters' || docTypeForSummary === 'Financial Planner Letter') {
-        summaryPrompt = `You are a forensic analyst reviewing correspondence. Summarize the key financial themes, assets mentioned, and any specific advice or requests made in this letter.`;
-    } else if (docTypeForSummary === 'Tax Returns & Forms (Federal/State)') {
-        summaryPrompt = `You are a forensic accountant. Summarize the key tax figures, including total income, tax liability, and any significant deductions or depreciation schedules found in this return.`;
-    } else if (docTypeForSummary === 'Invoices, Bills, & Receipts') {
-        summaryPrompt = `You are a forensic analyst. Summarize this transaction, noting the vendor, total amount, payment method, and any specific line items of interest.`;
-    }
-
-    // Generate artifacts for ALL lanes
-    await generateAndSaveSummary(summaryPrompt, fullMarkdownTranscript, finalBaseName, process.env.ARCHIVE_BUCKET!, originalPdfBuffer);
-
-    // 4. MOVE ORIGINAL FILE TO ARCHIVE
-    const sourceFile = storage.bucket(process.env.INPUT_BUCKET!).file(docRecord.filename);
-    const originalExt = path.extname(docRecord.filename);
-    const destinationFile = storage.bucket(process.env.ARCHIVE_BUCKET!).file(`${folderName}/${finalBaseName}_source${originalExt}`);
-    await sourceFile.move(destinationFile);
-    console.log(`Successfully moved original file to ${destinationFile.name}`);
-
-    // 5. CLEAN UP PROCESSING BUCKET
-    console.log(`Cleaning up processing files for docId: ${docId}`);
-    const [processingFiles] = await storage.bucket(process.env.PROCESSING_BUCKET!).getFiles({ prefix: `${docId}/` });
-    const deletePromises = processingFiles.map(file => file.delete());
-    await Promise.all(deletePromises);
-    console.log(`Deleted ${processingFiles.length} processing files.`);
     
-    // 6. FINALIZE DATABASE RECORD
-    await supabase
-      .from('documents')
-      .update({ 
-        status: 'archived_with_summary',
-        gcs_archive_path: destinationFile.name,
-        // You could also add the summary text itself to the record here
-        // summary: summaryText 
-      })
-      .eq('id', docId);
+    // CRITICAL FIX: ignoreEncryption: true to handle protected PDFs
+    const pdfDoc = await PDFDocument.load(originalPdfBuffer, { ignoreEncryption: true });
+    
+    pdfDoc.setTitle(`Forensic Analysis: ${finalBaseName}`);
+    pdfDoc.setSubject(finalSummaryText.substring(0, 2000)); // Embed summary in metadata
+    pdfDoc.setKeywords(['Forensics', docType, 'Legal Engine']);
+    
+    const pdfBytes = await pdfDoc.save();
+    await archiveBucket.file(`${folderName}/${dsBaseName}.pdf`).save(pdfBytes);
 
-    console.log(`Successfully archived and summarized: ${folderName}`);
+    // 8. CLEANUP & FINALIZE
+    // Move source file
+    const originalExt = path.extname(docRecord.filename);
+    await storage.bucket(process.env.INPUT_BUCKET!).file(docRecord.filename)
+      .move(archiveBucket.file(`${folderName}/${finalBaseName}_source${originalExt}`));
 
-  } catch (err) {
-    const error = err as Error;
-    console.error(`Fatal Error in Aggregator: ${error.message}`, error.stack);
+    // Update DB
+    await supabase.from('documents').update({ 
+      status: 'archived_with_summary',
+      gcs_archive_path: `${folderName}/${dsBaseName}.pdf`,
+      summary_data: JSON.parse(summaryJson)
+    }).eq('id', docId);
+
+    console.log(`✅ Aggregation Complete: ${folderName}`);
+
+  } catch (err: any) {
+    console.error(`FATAL AGGREGATOR ERROR: ${err.message}`);
     process.exit(1);
   }
 }

@@ -1,0 +1,27 @@
+{
+  "system_settings": {
+    "model_standard": "gemini-1.5-flash-001",
+    "model_reasoning": "gemini-1.5-pro-001",
+    "parsing_mode": "strict_json"
+  },
+  "prompts": {
+    "classification": {
+      "template": "Classify this document image.\nOptions: 'Financial Planner Letters' | 'Legal Contracts' | 'Tax Returns' | 'Bank Statements' | 'Check Registers' | 'Receipts'\n\nCRITICAL: Prioritize 'Financial Planner Letters' for any correspondence from an advisor. Prioritize 'Check Registers' only for handwritten grids.\n\nReturn JSON: { \"docType\": \"string\", \"reasoning\": \"string\" }"
+    },
+    "legal_analysis": {
+      "template": "You are an expert Legal Forensic Analyst.\n\nTASK:\n1. Extract Parties, Effective Dates, and Obligations.\n2. Identify RESTRICTIONS on asset transfers or spending.\n3. Build a chronological timeline of events mentioned.\n4. Rate risks (Low/Medium/High) for ambiguous clauses.\n\nOUTPUT JSON:\n{\n  \"Document Type\": \"string\",\n  \"Effective Date\": \"YYYY-MM-DD\",\n  \"Parties\": [\"string\"],\n  \"Obligations\": [{\"Type\": \"string\", \"Amount\": \"string\", \"Details\": \"string\"}],\n  \"Restrictions\": [{\"Clause\": \"string\", \"Impact\": \"string\"}],\n  \"Risks\": [{\"Risk\": \"string\", \"Severity\": \"string\", \"Reasoning\": \"string\"}],\n  \"Timeline\": [{\"Date\": \"YYYY-MM-DD\", \"Event\": \"string\"}]\n}"
+    },
+    "financial_planner": {
+      "template": "You are a Forensic Accountant. \n\nCONTEXT - LEGAL RESTRICTIONS FROM PRENUP:\n{{PRENUP_CONTEXT}}\n\nTASK:\nAnalyze this letter. Does any advice violate the restrictions above? Identify asset movement strategies.\n\nOUTPUT JSON:\n{\n  \"Letter Date\": \"YYYY-MM-DD\",\n  \"Organization\": \"string\",\n  \"Recipients\": \"string\",\n  \"Subject\": \"string\",\n  \"Forensic Analysis\": {\n     \"Strategy\": \"string\",\n     \"Violations\": [{\"Clause\": \"string\", \"Violation\": \"string\"}],\n     \"Commingling_Notes\": \"string\"\n  }\n}"
+    },
+    "bank_statement_math": {
+      "template": "Extract transaction lines into a strictly valid JSON array.\nCapture: Date, Description, Amount (Negative for debit, Positive for credit), and Running Balance.\n\nOUTPUT JSON:\n{\n  \"Account Number\": \"string\",\n  \"Period\": \"string\",\n  \"statement_lines\": [\n    { \"date\": \"YYYY-MM-DD\", \"description\": \"string\", \"amount\": number, \"balance\": number }\n  ]\n}"
+    },
+    "check_register": {
+      "template": "Digitize this HANDWRITTEN check register.\n\nOCR CONTEXT:\n{{OCR_TEXT}}\n\nTASK:\n1. Reconstruct the chronological ledger.\n2. If dates are missing (e.g. \"12/5\" without year), infer year from context.\n3. Split 'Description' into 'Payee' and 'Memo' if combined.\n\nOUTPUT JSON:\n{\n  \"register_summary\": { \"entity\": \"string\", \"period\": \"string\" },\n  \"transactions\": [\n    { \"date\": \"YYYY-MM-DD\", \"check_num\": \"string\", \"payee\": \"string\", \"memo\": \"string\", \"payment\": \"string\", \"deposit\": \"string\", \"balance\": \"string\" }\n  ]\n}"
+    },
+    "tax_return": {
+      "template": "Extract key tax data and depreciation schedules.\n\nOUTPUT JSON:\n{\n  \"Tax Year\": \"integer\",\n  \"Form\": \"string\",\n  \"Entity\": \"string\",\n  \"Total Income\": \"number\",\n  \"Tax Liability\": \"number\",\n  \"Depreciation\": [{\"Asset\": \"string\", \"Date Acquired\": \"string\", \"Cost\": \"number\"}]\n}"
+    }
+  }
+}

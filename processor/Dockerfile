@@ -7,19 +7,35 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# 2. Copy source code AND prompts
+# Stage 2: Build
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# (The above copies src/, prompts/, tsconfig.json, etc.)
-
-# 3. Build the TypeScript code
 RUN npm run build
 
-# 4. Expose port (Cloud Run default)
-EXPOSE 8080
+# Stage 3: Production
+FROM node:20-alpine AS production
+WORKDIR /app
+ENV NODE_ENV=production
 
-# 5. Run as non-root user
+# COPY ARTIFACTS
+COPY --from=builder /app/dist ./dist
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json .
+
+# ... (Previous steps remain the same)
+
+RUN npm run build
+
+# 5. ASSETS: Manually copy JSON to the 'dist' folder for runtime
+# We create the directory structure and copy the prompts
+RUN mkdir -p dist/processor/prompts && \
+    cp processor/prompts/*.json dist/processor/prompts/
+
+# ... (Rest of Dockerfile)
+
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-# 6. Start the app
 CMD ["node", "dist/index.js"]
