@@ -11,91 +11,83 @@ This document outlines metadata schemas for various structured and unstructured 
 | :--- | :--- | :--- | :--- |
 | **Vendor/Merchant Name** | String | The entity issuing the document. | Header Logo / Top Left text |
 | **Document Type** | Enum | Invoice, Credit Memo, Receipt, Quote. | Explicit in header |
-| **Document ID** | String | Invoice Number, Receipt ID, or Order #. | Key-Value Pair (e.g., 'Inv #: 102') |
-| **PO Number** | String | Purchase Order reference number. | Header / B2B reference block |
+| **Document ID** | String | Invoice Number, Receipt ID, or Order #. | Key-Value Pair |
 | **Transaction Date** | Date | Date service was rendered or purchase made. | Header / Top Right |
-| **Due Date** | Date | Date payment is required (Net 30/60/90). | Specific to Invoices/Bills |
-| **Subtotal** | Currency | $$ \sum (\text{Price} \times \text{Qty}) $$ before tax/fees. | Bottom Summary Block |
-| **Tax Amount** | Currency | Sales tax, VAT, or GST. | Bottom Summary Block |
 | **Grand Total** | Currency | Final amount to be paid. | Bottom Summary Block (Bolded) |
 | **Line Item Description** | String | Name of product or service. | Table rows (Repeated) |
-| **Payment Method** | String | Visa, Cash, ACH, Check ending in ****. | Footer / Summary |
 
 ***
 
 ### Banking & Credit
-**Sub-Category:** Bank Statements & Credit Card Statements
+**Sub-Category:** Bank Statements
 
 > Focuses on running balances and statement periods.
 
 | Field Name | Data Type | Description | Structure Context |
 | :--- | :--- | :--- | :--- |
 | **Financial Institution** | String | Bank or Credit Card Issuer Name. | Header Logo |
-| **Account Number (Masked)** | String | Last 4 digits of the account. | Header / Top Right |
+| **Account Number** | String | Last 4 digits of the account. | Header / Top Right |
 | **Statement Period** | Date Range | Start Date to End Date. | Header info block |
-| **Opening Balance** | Currency | Money available at start of period. | Summary Box |
 | **Closing Balance** | Currency | Money available at end of period. | Summary Box |
-| **Total Deposits/Credits** | Currency | Sum of incoming funds. | Summary Box |
-| **Total Withdrawals/Debits** | Currency | Sum of outgoing funds. | Summary Box |
-| **APR / Interest Rate** | Percentage | Annual Percentage Rate charged. | Footer / Fine Print |
-| **Transaction Row Date** | Date | Date transaction occurred. | Ledger Table Column |
-| **Transaction Code** | String | ACH, POS, CHK, DEP codes. | Ledger Table Column |
 
 ***
 
-### Legal & Agreements
-**Sub-Category:** Contracts (NDA, MSA, Employment)
+### Forensic Analysis
+**Sub-Category:** Bank Statement Check Images (Composite)
 
-> Unstructured text extraction requiring NLP.
+> Complex extraction linking scanned check images to statement line-item text for validation.
 
 | Field Name | Data Type | Description | Structure Context |
 | :--- | :--- | :--- | :--- |
-| **Agreement Type** | String | NDA, MSA, Lease, etc. | Title / Header |
-| **Effective Date** | Date | When the contract becomes active. | First paragraph preamble |
-| **Termination Date** | Date | When the contract expires. | 'Term' clause |
-| **Party A (Discloser/Lessor)** | Entity | Name of the first entity. | Preamble |
-| **Party B (Recipient/Lessee)** | Entity | Name of the second entity. | Preamble |
-| **Jurisdiction** | Location | State/Country laws governing contract. | 'Governing Law' clause |
-| **Contract Value** | Currency | Total monetary value of the deal. | Consideration / Payment Terms |
-| **Renewal Type** | Boolean/Enum | Auto-renew vs Manual renew. | 'Term and Termination' clause |
-| **Signatories** | String | Names of individuals signing. | Signature Block (Bottom) |
+| **Statement Verification Line** | String | The printed text immediately below the check image. | Page Layout / Anchor |
+| **Payor Block** | Object | Name, Address, Phone of account holder. | Check Image: Top Left |
+| **Date Written** | Date | Handwritten date. | Check Image: Top Right |
+| **Check # (Image)** | Integer | Printed sequence number on the check paper. | Check Image: Top Right |
+| **Payee Name** | String | Handwritten or Typed name of recipient. | Check Image: Center Left |
+| **Courtesy Amount** | Currency | Numeric amount in the box. | Check Image: Center Right |
+| **Legal Amount** | String | Amount written in words. | Check Image: Center Bottom |
+| **MICR Line** | String | Machine-readable E-13B font characters. | Check Image: Bottom Edge |
 
 ***
 
-### Direct Store Delivery (DSD)
-**Sub-Category:** Vendor Invoices (Coke, Pepsi, Frito-Lay, Aunt Millies)
+### Personal Finance Logs
+**Sub-Category:** Handwritten Monthly Expense Logs (Judy/Keith Format)
 
-> Supply chain logistics fields for route accounting.
+> Unstructured lined paper logs with specific forensic behaviors (dittos, margin notes, ink changes).
 
 | Field Name | Data Type | Description | Structure Context |
 | :--- | :--- | :--- | :--- |
-| **Route Number** | String | ID of the specific delivery truck route. | Header (Critical for tracking) |
-| **Store Number** | String | Vendor's internal ID for the store. | Header |
-| **Driver Name/ID** | String | Who physically delivered the goods. | Header or Signature line |
-| **Delivery Signature** | Image/Bool | Proof store manager signed for goods. | Bottom (Handwritten) |
-| **Case Count** | Integer | Number of physical boxes/crates delivered. | Table Total |
-| **Bottle Deposit (CRV)** | Currency | State-mandated deposit fees. | Line item or Footer |
-| **Credits/Returns** | Currency | Deduction for damaged/stale goods. | Negative values in body/footer |
-| **UPC/EAN** | Numeric | Barcode number (12/13 digits). | Table Row (High precision) |
-| **Promotion/Allowance** | Currency | Discounts applied at delivery. | Line item adjustment |
+| **Entity Name** | String | Top header name (e.g., 'Judy' or 'Keith'). | Page Header |
+| **Reporting Period** | Date | Month and Year of the log. | Page Header |
+| **Payee (Main)** | String | Primary recipient or description. | Column 1 |
+| **Payee Modifier (Margin)** | String | Text written in the left margin acting as a prefix. | Left Margin |
+| **Payment Method** | String | Auto Pay, Cash, or Check #. | Column 2 |
+| **Amount** | Currency | Transaction value. | Column 5 |
+| **Ditto Resolution** | Boolean | Indicates if value was derived from (") marks above. | Vertical Pattern Recognition |
 
 ***
 
-### Personal Finance
-**Sub-Category:** Handwritten Check Registers
+### Financial Registers
+**Sub-Category:** Handwritten Checkbook Transaction Register
 
-> Unstructured handwriting grids, often requiring HTR.
+> Strict grid-based extraction. Critical focus on multi-line descriptions (Payee vs Memo), code identification, and running balance logic.
 
 | Field Name | Data Type | Description | Structure Context |
 | :--- | :--- | :--- | :--- |
-| **Check Number** | Integer | Sequential number (e.g., 101, 102). | First Column (Anchor field) |
-| **Entry Date** | Date | Date written (often incomplete e.g., '1/5'). | Second Column |
-| **Transaction Description** | String | Payee name or notes. | Wide middle column |
-| **Payment Amount (-)** | Currency | Debit amount. | Column right of description |
-| **Deposit Amount (+)** | Currency | Credit amount. | Column right of Payment |
-| **Reconciled Flag** | Boolean | Checkmark for bank matching. | Tiny column (tick mark) |
-| **Running Balance** | Currency | User-calculated balance. | Far right column |
-| **Void Indicator** | Boolean | Strike-through or word 'VOID'. | Visual overlay |
+| **Page Year** | Integer | The year context for the page (often found in header or top row). | Header/Context |
+| **Row Sequence** | Integer | Visual line number (1-indexed) to maintain strict order. | Layout |
+| **Transaction Code** | String | Raw code: 'EFT', 'Dep', 'ATM', or Check Number (e.g., '1014'). | Col 1: Number/Code |
+| **Date (Raw)** | String | Date exactly as written (e.g., '1/4', '2/1'). | Col 2: Date |
+| **Date (Normalized)** | Date | MM/DD/YYYY inferred from Page Year context. | Computed |
+| **Payee / Description (Line 1)** | String | Primary text on the top half of the row (e.g., 'Spartan Lease'). | Col 3: Top Line |
+| **Memo / Notes (Line 2)** | String | Secondary text on bottom half (e.g., 'Jan 2016', 'Acct# 123'). | Col 3: Bottom Line |
+| **Payment / Debit (-)** | Currency | Amount of withdrawal or payment. | Col 4: Payment |
+| **Reconciled Flag** | Boolean | True if a checkmark (✓) or 'x' appears. | Col 5: Checkbox |
+| **Fee Amount** | Currency | Bank fees or service charges. | Col 6: Fee |
+| **Deposit / Credit (+)** | Currency | Amount of deposit or interest. | Col 7: Deposit |
+| **Running Balance** | Currency | The user-calculated balance on the right. | Col 8: Balance |
+| **Correction Indicator** | String | Notes on crossed-out numbers or scribbles. | Visual Analysis |
+| **Balance Forward Row** | Boolean | True if this is the top row carrying over from previous page. | Top Row Logic |
 
 ***
 

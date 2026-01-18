@@ -48,7 +48,7 @@ function safeGet(data: any, key: string): any {
   // Direct match
   if (data[key] !== undefined) return data[key];
   // Case-insensitive match
-  const found = Object.keys(data).find(k => k.toLowerCase() === key.toLowerCase());
+  const found = Object.keys(data).find(k => k.toLowerCase().trim() === key.toLowerCase());
   return found ? data[found] : null;
 }
 

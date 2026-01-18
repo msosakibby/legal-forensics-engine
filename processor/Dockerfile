@@ -1,31 +1,25 @@
-# Stage 1: Install dependencies
-FROM node:20-alpine AS deps
+# Single-stage build for safety
+FROM node:20-alpine
+
 WORKDIR /app
+
+# 1. Install dependencies
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# Stage 2: Build the TypeScript code
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+# 2. Copy source code AND prompts
 COPY . .
-# This is where we copy the prompts folder
-COPY ./prompts ./prompts
+# (The above copies src/, prompts/, tsconfig.json, etc.)
+
+# 3. Build the TypeScript code
 RUN npm run build
 
-# Stage 3: Production image - FINAL
-FROM node:20-alpine AS production
-WORKDIR /app
-ENV NODE_ENV=production
+# 4. Expose port (Cloud Run default)
+EXPOSE 8080
 
-# Copy the necessary compiled code, dependencies, AND prompts
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prompts ./prompts
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json .
-
-# Run as a non-root user for security
+# 5. Run as non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
+# 6. Start the app
 CMD ["node", "dist/index.js"]

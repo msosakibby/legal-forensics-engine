@@ -1,7 +1,7 @@
 {
-  "name": "service-name",
+  "name": "splitter",
   "version": "1.0.0",
-  "description": "",
+  "description": "Document splitter service",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -9,9 +9,13 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@google-cloud/storage": "latest",
-    "@supabase/supabase-js": "latest",
+    "@google-cloud/pubsub": "^4.3.3",
+    "@google-cloud/storage": "^7.7.0",
+    "@supabase/supabase-js": "^2.39.3",
+    "pdf-lib": "^1.17.1",
     "typescript": "^5.4.5",
-    "@types/node": "^20.12.12"
-  }
+    "@types/node": "^20.11.0"
+  },
+  "author": "",
+  "license": "ISC"
 }

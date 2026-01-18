@@ -1,0 +1,138 @@
+{
+  "schemas": [
+    {
+      "category": "General Transactional",
+      "subCategory": "Invoices, Bills, & Receipts",
+      "description": "Common fields for B2B invoices and POS receipts.",
+      "fields": [
+        {
+          "name": "Vendor Name",
+          "type": "String",
+          "desc": "Entity issuing document.",
+          "context": "Header"
+        },
+        {
+          "name": "Total Amount",
+          "type": "Currency",
+          "desc": "Final amount to be paid.",
+          "context": "Footer"
+        },
+        {
+          "name": "Date",
+          "type": "Date",
+          "desc": "Transaction date.",
+          "context": "Header"
+        }
+      ]
+    },
+    {
+      "category": "Banking & Credit",
+      "subCategory": "Statements",
+      "description": "Running balances and periods.",
+      "fields": [
+        {
+          "name": "Account #",
+          "type": "String",
+          "desc": "Masked account number.",
+          "context": "Header"
+        },
+        {
+          "name": "Period",
+          "type": "Date Range",
+          "desc": "Statement start/end.",
+          "context": "Header"
+        }
+      ]
+    },
+    {
+      "category": "Forensic Analysis",
+      "subCategory": "Bank Statement Check Images",
+      "description": "Complex extraction linking scanned check images to statement line-item text.",
+      "fields": [
+        {
+          "name": "Statement Line",
+          "type": "String",
+          "desc": "Printed verification text.",
+          "context": "Below Image"
+        },
+        {
+          "name": "Payor Info",
+          "type": "Object",
+          "desc": "Name/Address top left.",
+          "context": "Image Top-Left"
+        },
+        {
+          "name": "MICR Line",
+          "type": "String",
+          "desc": "E-13B font characters.",
+          "context": "Image Bottom"
+        }
+      ]
+    }
+  ],
+  "example_visuals": {
+    "meta": {
+      "page_number": 2,
+      "account_number": "1024797",
+      "scan_date": "2024-02-23"
+    },
+    "checks": [
+      {
+        "id": "chk_9586",
+        "statement_verification": {
+          "check_number": "9586",
+          "raw_text": "Check #9586 Paid : 12/18/2007 $50.00"
+        },
+        "image_analysis": {
+          "payor": {
+            "name": "K. Grundy",
+            "address": "P.O. Box 297, Marion, MI"
+          },
+          "transaction_details": {
+            "date_written": "2007-12-04",
+            "check_number_top_right": "9586",
+            "payee_handwritten": "VFW Auxiliary 6015",
+            "amount_numeric": 50,
+            "amount_legal_text": "Fifty and 00/100",
+            "bank_info": "Chemical Bank West",
+            "memo": "Dues"
+          },
+          "micr_line": {
+            "raw": "⑆072404948⑆ 0001024797⑈ 9586"
+          },
+          "validation": {
+            "amount_match": true
+          }
+        }
+      },
+      {
+        "id": "chk_9588",
+        "statement_verification": {
+          "check_number": "9588",
+          "raw_text": "Check #9588 Paid : 12/13/2007 $1000.00"
+        },
+        "image_analysis": {
+          "payor": {
+            "name": "K. Grundy",
+            "address": "P.O. Box 297, Marion, MI"
+          },
+          "transaction_details": {
+            "date_written": "2007-12-07",
+            "check_number_top_right": "9588",
+            "payee_handwritten": "Judy Grandy",
+            "amount_numeric": 1000,
+            "amount_legal_text": "One Thousand & 00/100",
+            "bank_info": "Chemical Bank West",
+            "memo": null
+          },
+          "micr_line": {
+            "raw": "⑆072404948⑆ 0001024797⑈ 9588"
+          },
+          "validation": {
+            "amount_match": true
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,42 +1,26 @@
-# Dockerfile
+FROM node:20-slim
 
-# ---- Base ----
-# Use a specific version of node:20-alpine for reproducibility
-FROM node:20-alpine AS base
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# ---- Dependencies ----
-# Use a dedicated layer for dependencies to leverage Docker's caching.
-# This layer is only rebuilt when package.json or package-lock.json changes.
-FROM base AS deps
+# 1. Copy dependency definitions
 COPY package.json package-lock.json* ./
+# Copy sub-project package files if they exist to prevent install warnings, 
+# though root package.json drives the main install.
+COPY processor/package.json ./processor/
+COPY aggregator/package.json ./aggregator/
+
+# 2. Install dependencies
 RUN npm ci
 
-# ---- Builder ----
-# This stage builds the TypeScript code into JavaScript.
-FROM deps AS builder
+# 3. Copy source code
 COPY . .
+
+# 4. Build TypeScript
 RUN npm run build
 
-# ---- Production ----
-# This is the final, lean image that will be deployed.
-FROM base AS production
-ENV NODE_ENV=production
+# 5. Copy static assets (JSON prompts) that tsc doesn't move
+RUN mkdir -p dist/processor/prompts && \
+    cp processor/prompts/document_metadata.json dist/processor/prompts/
 
-# Copy production dependencies from the 'deps' stage.
-COPY --from=deps /usr/src/app/node_modules ./node_modules
-# Copy the compiled application code from the 'builder' stage.
-COPY --from=builder /usr/src/app/dist ./dist
-# Copy package.json to be able to run 'npm start'
-COPY package.json .
-
-# Create a non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-USER appuser
-
-# Expose the port the app runs on
-EXPOSE 3000
-
-# The command to run the application
-CMD ["npm", "start"]
-
+# Default Command (Dispatcher) - can be overridden by Cloud Run Jobs
+CMD ["node", "dist/dispatcher/src/index.js"]

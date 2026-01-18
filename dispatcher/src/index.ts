@@ -10,7 +10,7 @@ const runClient = new JobsClient();
 app.use(express.json());
 
 // --- 1. INGEST ROUTER (Smart Dispatch) ---
-app.post('/trigger-splitter', async (req, res) => {
+app.post('/trigger-splitter', async (req: any, res: any) => {
   try {
     if (!req.body.message || !req.body.message.data) {
       res.status(400).send('Bad Request: Missing message data'); return;
@@ -47,8 +47,14 @@ app.post('/trigger-splitter', async (req, res) => {
             overrides: {
                 containerOverrides: [{
                     env: [
+                        // Task-specific
                         { name: "INPUT_BUCKET", value: bucket },
-                        { name: "INPUT_FILE", value: name }
+                        { name: "INPUT_FILE", value: name },
+                        // Inherited from Dispatcher
+                        { name: "ARCHIVE_BUCKET", value: process.env.ARCHIVE_BUCKET! },
+                        { name: "SUPABASE_URL", value: process.env.SUPABASE_URL! },
+                        { name: "SUPABASE_KEY", value: process.env.SUPABASE_KEY! },
+                        { name: "OPENAI_API_KEY", value: process.env.OPENAI_API_KEY! }
                     ]
                 }]
             }
@@ -70,8 +76,14 @@ app.post('/trigger-splitter', async (req, res) => {
         overrides: {
             containerOverrides: [{
                 env: [
+                    // Task-specific
                     { name: "INPUT_BUCKET", value: bucket },
-                    { name: "FILE_NAME", value: name }
+                    { name: "FILE_NAME", value: name },
+                    // Inherited from Dispatcher
+                    { name: "PROCESSING_BUCKET", value: process.env.PROCESSING_BUCKET! },
+                    { name: "TOPIC_NAME", value: process.env.TOPIC_NAME! },
+                    { name: "SUPABASE_URL", value: process.env.SUPABASE_URL! },
+                    { name: "SUPABASE_KEY", value: process.env.SUPABASE_KEY! }
                 ]
             }]
         }
@@ -86,7 +98,7 @@ app.post('/trigger-splitter', async (req, res) => {
 });
 
 // --- 2. TRIGGER PROCESSOR (Pass-through) ---
-app.post('/trigger-processor', async (req, res) => {
+app.post('/trigger-processor', async (req: any, res: any) => {
   try {
     if (!req.body.message || !req.body.message.data) {
       res.status(400).send('Bad Request'); return;
@@ -106,10 +118,17 @@ app.post('/trigger-processor', async (req, res) => {
       overrides: {
         containerOverrides: [{
           env: [
+            // Task-specific
             { name: "BUCKET", value: eventData.bucket },
             { name: "FILE", value: eventData.file },
             { name: "DOC_ID", value: eventData.docId },
-            { name: "PAGE_INDEX", value: String(eventData.pageIndex) }
+            { name: "PAGE_INDEX", value: String(eventData.pageIndex) },
+            // Inherited from Dispatcher
+            { name: "SUPABASE_URL", value: process.env.SUPABASE_URL! },
+            { name: "SUPABASE_KEY", value: process.env.SUPABASE_KEY! },
+            { name: "GOOGLE_CLOUD_PROJECT", value: process.env.GOOGLE_CLOUD_PROJECT! },
+            { name: "REGION", value: process.env.REGION! },
+            { name: "LLAMA_CLOUD_API_KEY", value: process.env.LLAMA_CLOUD_API_KEY! }
           ]
         }]
       }
@@ -123,7 +142,7 @@ app.post('/trigger-processor', async (req, res) => {
 });
 
 // --- 3. TRIGGER AGGREGATOR (Pass-through) ---
-app.post('/trigger-aggregator', async (req, res) => {
+app.post('/trigger-aggregator', async (req: any, res: any) => {
   try {
     if (!req.body.message || !req.body.message.data) {
       res.status(400).send('Bad Request'); return;
@@ -142,7 +161,18 @@ app.post('/trigger-aggregator', async (req, res) => {
       name: jobFullName,
       overrides: {
         containerOverrides: [{
-          env: [{ name: "DOC_ID", value: eventData.docId }]
+          env: [
+            // Task-specific
+            { name: "DOC_ID", value: eventData.docId },
+            // Inherited from Dispatcher
+            { name: "INPUT_BUCKET", value: process.env.INPUT_BUCKET! },
+            { name: "PROCESSING_BUCKET", value: process.env.PROCESSING_BUCKET! },
+            { name: "ARCHIVE_BUCKET", value: process.env.ARCHIVE_BUCKET! },
+            { name: "SUPABASE_URL", value: process.env.SUPABASE_URL! },
+            { name: "SUPABASE_KEY", value: process.env.SUPABASE_KEY! },
+            { name: "GOOGLE_CLOUD_PROJECT", value: process.env.GOOGLE_CLOUD_PROJECT! },
+            { name: "REGION", value: process.env.REGION! }
+          ]
         }]
       }
     });
