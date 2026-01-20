@@ -16,53 +16,60 @@ JOB_AGGREGATOR="lfe-aggregator"
 JOB_MEDIA="lfe-media-processor"
 SERVICE_DISPATCHER="lfe-dispatcher"
 
+# Bucket Names (Aligned with your project pattern)
+INPUT_BUCKET="${PROJECT_ID}-input"
+PROCESSING_BUCKET="${PROJECT_ID}-processing"
+ARCHIVE_BUCKET="${PROJECT_ID}-archive"
+
 echo "🚀 DEPLOYING TO PROJECT: $PROJECT_ID ($REGION)"
 
-# 1. Enable Services (First run only)
-# gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
 
-# 2. Create Artifact Registry Repo (if not exists)
-if ! gcloud artifacts repositories describe $REPO_NAME --location=$REGION > /dev/null 2>&1; then
-    echo "Creating Artifact Registry Repository..."
-    gcloud artifacts repositories create $REPO_NAME --repository-format=docker --location=$REGION
-fi
+# 0. Fix Structure
+chmod +x fix_structure.sh
+./fix_structure.sh
 
-# 3. Build & Push Image
+# 1. Build & Push Image
 echo "📦 Building and Pushing Docker Image..."
 gcloud builds submit --tag $IMAGE_URI .
 
-# 4. Deploy Cloud Run Jobs
+# 2. Deploy Cloud Run Jobs
 
+# --- SPLITTER ---
 echo "⚙️  Deploying Splitter Job..."
 gcloud run jobs deploy $JOB_SPLITTER \
   --image $IMAGE_URI \
   --region $REGION \
   --command "node" \
   --args "dist/splitter/src/index.js" \
-  --set-env-vars "TOPIC_NAME=page-processing-topic" \
-  --set-env-vars "PROCESSING_BUCKET=lfe-processing-$PROJECT_ID" \
+  --max-retries 0 \
   --set-env-vars "REGION=$REGION" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
-  --set-secrets="SUPABASE_URL=supabase-url:latest" \
-  --set-secrets="SUPABASE_KEY=supabase-key:latest" \
-  --max-retries 0
+  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
+  --set-env-vars "PROCESSING_BUCKET=$PROCESSING_BUCKET" \
+  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+  --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest"
 
-
+# --- PROCESSOR ---
 echo "⚙️  Deploying Processor Job (Forensic Edition)..."
 gcloud run jobs deploy $JOB_PROCESSOR \
   --image $IMAGE_URI \
   --region $REGION \
   --command "node" \
-  --args "dist/index.js" \
-  --memory 4Gi \  # Increased for complex PDF parsing
-  --cpu 2 \       # Increased for LlamaParse/Vision concurrency
+  --args "dist/processor/src/index.js" \
+  --memory 4Gi \
+  --cpu 2 \
   --max-retries 3 \
   --set-env-vars "REGION=$REGION" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
-  --set-secrets="SUPABASE_URL=supabase-url:latest" \
-  --set-secrets="SUPABASE_KEY=supabase-key:latest" \
-  --set-secrets="LLAMA_CLOUD_API_KEY=llama-cloud-api-key:latest"
+  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
+  --set-env-vars "PROCESSING_BUCKET=$PROCESSING_BUCKET" \
+  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+  --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+  --set-secrets="LLAMA_CLOUD_API_KEY=LLAMA_CLOUD_API_KEY:latest"
 
+# --- AGGREGATOR ---
 echo "⚙️  Deploying Aggregator Job..."
 gcloud run jobs deploy $JOB_AGGREGATOR \
   --image $IMAGE_URI \
@@ -73,10 +80,30 @@ gcloud run jobs deploy $JOB_AGGREGATOR \
   --max-retries 1 \
   --set-env-vars "REGION=$REGION" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
-  --set-secrets="SUPABASE_URL=supabase-url:latest" \
-  --set-secrets="SUPABASE_KEY=supabase-key:latest"
+  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
+  --set-env-vars "PROCESSING_BUCKET=$PROCESSING_BUCKET" \
+  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+  --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest"
 
-# 5. Deploy Dispatcher Service
+# --- MEDIA PROCESSOR ---
+echo "⚙️  Deploying Media Processor Job..."
+gcloud run jobs deploy $JOB_MEDIA \
+  --image $IMAGE_URI \
+  --region $REGION \
+  --command "node" \
+  --args "dist/media-processor/src/index.js" \
+  --memory 2Gi \
+  --max-retries 1 \
+  --set-env-vars "REGION=$REGION" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
+  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
+  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+  --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+  --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest"
+
+# 3. Deploy Dispatcher Service
 echo "📡 Deploying Dispatcher Service..."
 gcloud run deploy $SERVICE_DISPATCHER \
   --image $IMAGE_URI \
@@ -88,15 +115,15 @@ gcloud run deploy $SERVICE_DISPATCHER \
   --set-env-vars "AGGREGATOR_JOB_NAME=$JOB_AGGREGATOR" \
   --set-env-vars "MEDIA_PROCESSOR_JOB_NAME=$JOB_MEDIA" \
   --set-env-vars "REGION=$REGION" \
-  --set-env-vars "INPUT_BUCKET=lfe-input-$PROJECT_ID" \
-  --set-env-vars "PROCESSING_BUCKET=lfe-processing-$PROJECT_ID" \
-  --set-env-vars "ARCHIVE_BUCKET=lfe-archive-$PROJECT_ID" \
-  --set-env-vars "TOPIC_NAME=page-processing-topic" \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
-  --set-secrets="SUPABASE_URL=supabase-url:latest" \
-  --set-secrets="SUPABASE_KEY=supabase-key:latest" \
-  --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
-  --set-secrets="LLAMA_CLOUD_API_KEY=llama-cloud-api-key:latest"
+  --set-env-vars "TOPIC_NAME=page-processing-topic" \
+  --set-env-vars "INPUT_BUCKET=$INPUT_BUCKET" \
+  --set-env-vars "PROCESSING_BUCKET=$PROCESSING_BUCKET" \
+  --set-env-vars "ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+  --set-secrets="SUPABASE_URL=SUPABASE_URL:latest" \
+  --set-secrets="SUPABASE_KEY=SUPABASE_KEY:latest" \
+  --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
+  --set-secrets="LLAMA_CLOUD_API_KEY=LLAMA_CLOUD_API_KEY:latest"
 
 echo "✅ DEPLOYMENT COMPLETE!"
 echo "Dispatcher URL: $(gcloud run services describe $SERVICE_DISPATCHER --region $REGION --format 'value(status.url)')"

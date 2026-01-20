@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, existsSync } from 'fs';
 import { inspect } from 'util';
+import { LaneFactory } from './factory.js';
 
 // --- GLOBAL ERROR HANDLERS ---
 process.on('uncaughtException', (err) => {
@@ -24,7 +25,7 @@ let LlamaParseReader: any;
 
 async function initClients() {
   console.log("🔌 Initializing Clients...");
-  
+
   const envPath = path.resolve(process.cwd(), '.env');
   if (existsSync(envPath)) {
     console.log(`   Loading environment from ${envPath}`);
@@ -46,15 +47,15 @@ async function initClients() {
     const llamaModule = await import('llamaindex');
 
     // Initialize Vertex AI
-    vertexAI = new vertexModule.VertexAI({ 
-        project: process.env.GOOGLE_CLOUD_PROJECT || 'mock-project', 
-        location: process.env.REGION || 'us-central1' 
+    vertexAI = new vertexModule.VertexAI({
+      project: process.env.GOOGLE_CLOUD_PROJECT || 'mock-project',
+      location: process.env.REGION || 'us-central1'
     });
 
     visionClient = new visionModule.ImageAnnotatorClient();
     LlamaParseReader = llamaModule.LlamaParseReader;
     supabase = createClient(process.env.SUPABASE_URL || 'https://mock.supabase.co', process.env.SUPABASE_KEY || 'mock-key');
-    
+
     console.log("✅ Clients Initialized Successfully");
   } catch (err) {
     console.error("\n❌ CRITICAL ERROR LOADING DEPENDENCIES");
@@ -82,12 +83,12 @@ async function extractTextWithVision(fileBuffer: Buffer): Promise<string> {
 }
 
 async function classifyWithAI(fileBuffer: Buffer, dataDictionary: any[]): Promise<string> {
-  console.log('   -> Classifying (Gemini 1.5 Flash)...'); 
+  console.log('   -> Classifying (Gemini 1.5 Flash)...');
   const model = vertexAI.getGenerativeModel({
-    model: 'gemini-1.5-flash-001', 
+    model: 'gemini-1.5-flash-001',
     generationConfig: { responseMimeType: 'application/json' }
   });
-  
+
   const sortedDictionary = [...dataDictionary].sort((a, b) => {
     if (a.subCategory.includes("Check Register")) return 1;
     if (b.subCategory.includes("Check Register")) return -1;
@@ -95,19 +96,25 @@ async function classifyWithAI(fileBuffer: Buffer, dataDictionary: any[]): Promis
   });
 
   const options = sortedDictionary.map((d: any) => `'${d.subCategory}'`).join(' | ');
-  
+
   const parts: Part[] = [
     fileToPart(fileBuffer, 'application/pdf'),
-    { text: `Classify this document. 
+    {
+      text: `Classify this document. 
 Options: ${options}
 
 CRITICAL INSTRUCTIONS (IN ORDER OF PRIORITY):
 1.  **Financial Planner Letters**: If the document is a typed letter, correspondence, or meeting summary, especially from a financial advisor, classify it as 'Financial Planner Letters'. This takes precedence even if it contains tables or transaction data.
-2.  **Legal Contracts & Agreements**: If the document is a Prenuptial Agreement, Divorce Decree, Court Judgment, or other formal legal contract, classify it as 'Legal Contracts & Agreements'.
+2.  **Legal Contracts & Agreements**: If the document is a Prenuptial Agreement or other formal legal contract, classify it as 'Legal Contracts & Agreements'.
 3.  **Tax Returns & Forms**: If the document is an official tax form (e.g., 1040, 1099, W-2), classify it as 'Tax Returns & Forms (Federal/State)'.
-4.  **Bank Statements**: If the document is a standard bank or credit card statement, classify it as 'Bank Statements & Credit Card Statements'.
-5.  **Handwritten Check Registers**: ONLY if the document's primary content is a HANDWRITTEN grid or ledger for tracking checks and transactions, classify it as 'Handwritten Check Registers'. Do NOT use this for typed letters or statements.
-6.  **Receipts**: If it is a point-of-sale receipt or a simple invoice, classify it as 'Invoices, Bills, & Receipts'.
+4.  **Bank Statements**: If the document is a standard bank statement (checking/savings), classify it as 'Bank Statements'.
+5.  **Credit Card Statements**: If the document is a credit card statement (Visa, Amex, Mastercard) often containing payment coupons, APR tables, or credit limit info, classify it as 'Credit Card Statements'.
+6.  **Handwritten Check Registers**: ONLY if the document's primary content is a HANDWRITTEN grid or ledger for tracking checks and transactions, classify it as 'Handwritten Check Registers'. Do NOT use this for typed letters or statements.
+7.  **Handwritten Monthly Expense Logs**: If the document is an unstructured lined paper log tracking expenses (often with dittos, margin notes), classify it as 'Handwritten Monthly Expense Logs'.
+8.  **Receipts**: If it is a point-of-sale receipt (POS), classify it as 'Receipts'.
+9.  **Invoices & Bills**: If it is a formal invoice, utility bill, or statement of charges to be paid, classify it as 'Invoices & Bills'.
+10. **Real Estate Documents**: If the document is a Deed, Mortgage, Lease, Title Policy, Appraisal, or Closing Statement, classify it as 'Real Estate Documents'.
+11. **Court Judgments**: If the document is a Court Judgment, Divorce Decree, or Ruling, classify it as 'Court Judgments'.
 
 Return JSON: { "docType": "string", "reasoning": "string" }` }
   ];
@@ -132,16 +139,16 @@ async function runTest() {
   console.log(`\n🧪 TESTING PROCESSOR ON: ${filePath}`);
 
   const { data: doc, error: docInsertError } = await supabase.from('documents').insert({ filename: path.basename(filePath), status: 'test_harness' }).select().single();
-  
+
   if (docInsertError || !doc) {
-      console.error("❌ Failed to create dummy document record in Supabase.");
-      console.error(docInsertError);
-      process.exit(1);
+    console.error("❌ Failed to create dummy document record in Supabase.");
+    console.error(docInsertError);
+    process.exit(1);
   }
 
   const DOC_ID = doc.id;
   console.log(`Created Test Document ID: ${DOC_ID}`);
-  
+
   const fullFileBuffer = await fs.readFile(filePath);
 
   // Split PDF
@@ -149,76 +156,75 @@ async function runTest() {
   const pageCount = pdfDoc.getPageCount();
   console.log(`\n📄 Document has ${pageCount} pages. Testing with first page...`);
   const newPdf = await PDFDocument.create();
-  const [copiedPage] = await newPdf.copyPages(pdfDoc, [0]); 
+  const [copiedPage] = await newPdf.copyPages(pdfDoc, [0]);
   newPdf.addPage(copiedPage);
   const pageBufferUint8Array = await newPdf.save();
   const pageBuffer = Buffer.from(pageBufferUint8Array); // Convert Uint8Array to Buffer
-  
-  // In this simplified model, the docType is known. We are testing the 'Financial Planner Letters' processor.
-  const docType = "Financial Planner Letters";
-  console.log(`\n📂 Running as single-purpose processor for: "${docType}"`);
-  
+
+  // Define categories for classification
+  const categories = [
+    { subCategory: 'Financial Planner Letters' },
+    { subCategory: 'Legal Contracts & Agreements' },
+    { subCategory: 'Tax Returns & Forms (Federal/State)' },
+    { subCategory: 'Bank Statements' },
+    { subCategory: 'Credit Card Statements' },
+    { subCategory: 'Handwritten Check Registers' },
+    { subCategory: 'Handwritten Monthly Expense Logs' },
+    { subCategory: 'Receipts' },
+    { subCategory: 'Invoices & Bills' },
+    { subCategory: 'Real Estate Documents' },
+    { subCategory: 'Court Judgments' }
+  ];
+
+  const docType = await classifyWithAI(pageBuffer, categories);
+  console.log(`\n📂 Classified Document Type: "${docType}"`);
+
+  // Load Prompts
+  const promptsPath = path.resolve(__dirname, '../../prompts/forensic_prompts.json');
+  if (!existsSync(promptsPath)) {
+    console.error(`❌ Prompts file not found at ${promptsPath}`);
+    process.exit(1);
+  }
+  const promptConfig = JSON.parse(readFileSync(promptsPath, 'utf-8'));
+
   const proModel = vertexAI.getGenerativeModel({
-    model: 'gemini-3-pro-preview', 
+    model: 'gemini-1.5-pro-001',
     generationConfig: { responseMimeType: 'application/json' }
   });
 
   const pdfPart = fileToPart(pageBuffer, 'application/pdf');
-  let extractedData: any = {};
-  let markdown = "";
 
-  console.log("\n🚀 EXECUTING WORKFLOW: Financial Planner Letters");
-  markdown = await generateMarkdown(filePath);
-  const PLANNER_PROMPT = `
-You are an expert Forensic Accountant who specializes in Divorces. Analyze each letter and for both individuals or legal entities, provide detailed recommendation made by financial planner, any changes made or planned to be made, use those details to make observations of how portfolio allocation changes may benefit or negatively impact the other persons financial portfolio (both long and short term). Please make sure you all analysis is clear on what is owned individually by each, where there is a commingling of assets. Additionally, provide observations to all comments and recommendations with respect to any Trust. Make sure those observations include whether the changes have any real merit and how they could be used to positively benefit the other spouse.
+  const handler = LaneFactory.getHandler(docType);
 
-Also extract metadata: Date, Organization (Sender Company), Author (Sender Person), Recipients.
+  if (handler) {
+    console.log(`\n🚀 EXECUTING LANE STRATEGY: ${docType}`);
+    try {
+      const result = await handler.process({
+        docId: DOC_ID,
+        tempPath: filePath,
+        pdfPart,
+        fileBuffer: pageBuffer,
+        reasoningModel: proModel,
+        promptConfig,
+        supabase,
+        generateMarkdown,
+        extractTextWithVision
+      });
 
-CRITICAL: RETURN ONLY JSON. NO CONVERSATIONAL TEXT.
-OUTPUT MUST BE VALID JSON:
-{
-  "Letter Date": "YYYY-MM-DD",
-  "Organization": "string",
-  "Author Name": "string",
-  "Recipients": "string",
-  "Subject": "string",
-  "Forensic Analysis": {
-     "Recommendations": "string",
-     "Portfolio Impact": "string",
-     "Commingling Observations": "string",
-     "Trust Observations": "string",
-     "Spousal Benefit Analysis": "string",
-     "Prenup Compliance": "string"
+      console.log("\n💾 FINAL EXTRACTED JSON:");
+      console.log(JSON.stringify(result.extractedData, null, 2));
+    } catch (err: any) {
+      console.error("❌ Lane Processing Error:", err.message);
+    }
+  } else {
+    console.warn(`⚠️ No handler found for docType: ${docType}`);
   }
-}`;
-
-  const safeGet = (data: any, key: string): any => {
-    if (!data) return null;
-    const foundKey = Object.keys(data).find(k => k.toLowerCase() === key.toLowerCase());
-    return foundKey ? data[foundKey] : null;
-  };
-
-  const parts: Part[] = [pdfPart, { text: `${PLANNER_PROMPT}\n\nREFERENCE TEXT:\n${markdown}` }];
-  const res = await proModel.generateContent({ contents: [{ role: 'user', parts }] });
-  extractedData = JSON.parse(res.response.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
-  
-  await supabase.from('financial_correspondence').insert({
-      doc_id: DOC_ID,
-      letter_date: safeGet(extractedData, "letter date"),
-      addressee_name: safeGet(extractedData, "recipients"),
-      addressor_name: safeGet(extractedData, "organization"),
-      subject: safeGet(extractedData, "subject"),
-      analysis_data: extractedData["Forensic Analysis"]
-  });
-
-  console.log("\n💾 FINAL EXTRACTED JSON:");
-  console.log(JSON.stringify(extractedData, null, 2));
 }
 
 runTest().catch(err => {
-    console.error("\n🔥🔥🔥 AN UNCAUGHT ERROR OCCURRED 🔥🔥🔥\n");
-    if (err) {
-        console.error("ERROR OBJECT:", inspect(err, { depth: null, colors: true }));
-    }
-    process.exit(1);
+  console.error("\n🔥🔥🔥 AN UNCAUGHT ERROR OCCURRED 🔥🔥🔥\n");
+  if (err) {
+    console.error("ERROR OBJECT:", inspect(err, { depth: null, colors: true }));
+  }
+  process.exit(1);
 });

@@ -1,0 +1,27 @@
+# Dockerfile.processor
+FROM node:20-slim
+
+# Install system dependencies
+# LlamaParse/Vertex AI interaction via Node usually requires standard build tools
+RUN apt-get update && apt-get install -y \
+    openssl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm ci
+
+COPY . .
+
+RUN npm run build
+
+# Start the service
+# Ensures fs.readFile works by setting the working directory correctly
+ENV PORT=8080
+EXPOSE 8080
+
+# Assumes the compiled entry point is dist/processor.js
+CMD ["node", "dist/processor/index.js"]

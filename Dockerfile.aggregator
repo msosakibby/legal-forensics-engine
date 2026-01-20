@@ -1,0 +1,18 @@
+# Dockerfile.aggregator
+FROM node:20-slim
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm ci
+
+COPY . .
+
+RUN npm run build
+
+ENV PORT=8080
+EXPOSE 8080
+
+# Assumes the compiled entry point is dist/aggregator.js
+CMD ["node", "dist/aggregator/index.js"]

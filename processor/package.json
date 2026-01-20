@@ -17,6 +17,7 @@
     "@google-cloud/vision": "^4.3.0",
     "@supabase/supabase-js": "^2.39.3",
     "llamaindex": "^0.1.21",
+    "pdf-lib": "^1.17.1",
     "typescript": "^5.4.5",
     "@types/node": "^20.11.0"
   },

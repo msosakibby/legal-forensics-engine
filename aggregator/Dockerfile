@@ -1,28 +1,22 @@
-# Stage 1: Install dependencies
-FROM node:20-alpine AS deps
+FROM node:20-slim
+
 WORKDIR /app
+
+# 1. Copy dependency definitions
 COPY package.json package-lock.json* ./
+COPY processor/package.json ./processor/
+COPY aggregator/package.json ./aggregator/
+
+# 2. Install dependencies
 RUN npm ci
 
-# Stage 2: Build the TypeScript code
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+# 3. Copy source code
+COPY tsconfig.json ./
+COPY src ./src
+COPY aggregator ./aggregator
+
+# 4. Build TypeScript
 RUN npm run build
 
-# Stage 3: Production image - FINAL
-FROM node:20-alpine AS production
-WORKDIR /app
-ENV NODE_ENV=production
-
-# Copy only the necessary compiled code and dependencies
-COPY --from=builder /app/dist ./dist
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json .
-
-# Run as a non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-USER appuser
-
-CMD ["node", "dist/index.js"]
+# 5. Start the Aggregator
+CMD ["node", "dist/aggregator/src/index.js"]

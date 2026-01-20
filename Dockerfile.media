@@ -1,0 +1,38 @@
+# Dockerfile.media
+# Optimized for Media Forensics (Video/Audio/Image)
+FROM node:20-slim
+
+# Install system dependencies for media processing
+# - ffmpeg: For video/audio transcoding and thumbnail generation
+# - exiftool: For extracting deep forensic metadata from media files
+# - procps: For process monitoring if needed
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libimage-exiftool-perl \
+    procps \
+    openssl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy package definition
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy the full source code
+COPY . .
+
+# Build the TypeScript code
+RUN npm run build
+
+# Expose port (Cloud Run defaults to 8080)
+ENV PORT=8080
+EXPOSE 8080
+
+# Start the service
+# Assumes your entry point matches the service name. 
+# Adjust 'dist/media_processor.js' if your file is named differently (e.g., dist/index.js)
+CMD ["node", "dist/media_processor/index.js"]

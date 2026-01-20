@@ -1,28 +1,41 @@
 #!/bin/bash
+set -e
 
-echo "🔧 Setting up .env file..."
-
-# 1. Get Project ID
 PROJECT_ID=$(gcloud config get-value project)
 REGION="us-central1"
 
-echo "Detected Project ID: $PROJECT_ID"
+# Bucket Names (Standardized naming)
+INPUT_BUCKET="${PROJECT_ID}-input"
+PROCESSING_BUCKET="${PROJECT_ID}-processing"
+ARCHIVE_BUCKET="${PROJECT_ID}-archive"
 
-# 2. Fetch Secrets (Graceful fallback)
-echo "Fetching secrets from Google Cloud..."
-LLAMA_KEY=$(gcloud secrets versions access latest --secret="llama-cloud-api-key" --quiet 2>/dev/null || echo "PLACEHOLDER_LLAMA_KEY")
-SUPABASE_URL=$(gcloud secrets versions access latest --secret="supabase-url" --quiet 2>/dev/null || echo "PLACEHOLDER_SUPABASE_URL")
-SUPABASE_KEY=$(gcloud secrets versions access latest --secret="supabase-key" --quiet 2>/dev/null || echo "PLACEHOLDER_SUPABASE_KEY")
+echo "🚀 Setting up Cloud Run Environment for Project: $PROJECT_ID"
 
-# 3. Write .env
-cat > .env <<EOF
-GOOGLE_CLOUD_PROJECT=$PROJECT_ID
-REGION=$REGION
-LLAMA_CLOUD_API_KEY=$LLAMA_KEY
-SUPABASE_URL=$SUPABASE_URL
-SUPABASE_KEY=$SUPABASE_KEY
-EOF
+# 1. Create Buckets if they don't exist
+echo "📦 Checking Buckets..."
+gcloud storage buckets create gs://$INPUT_BUCKET --location=$REGION 2>/dev/null || echo "   - Input bucket exists or could not be created."
+gcloud storage buckets create gs://$PROCESSING_BUCKET --location=$REGION 2>/dev/null || echo "   - Processing bucket exists or could not be created."
+gcloud storage buckets create gs://$ARCHIVE_BUCKET --location=$REGION 2>/dev/null || echo "   - Archive bucket exists or could not be created."
 
-echo "✅ .env file created!"
-echo "Run 'chmod +x setup_env.sh' if needed, but I just ran it for you (conceptually)."
+# 2. Update Processor Job
+echo "⚙️  Configuring Processor Job..."
+gcloud run jobs update lfe-processor \
+    --region "$REGION" \
+    --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,REGION=$REGION,INPUT_BUCKET=$INPUT_BUCKET,PROCESSING_BUCKET=$PROCESSING_BUCKET,ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+    --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,LLAMA_CLOUD_API_KEY=LLAMA_CLOUD_API_KEY:latest"
 
+# 3. Update Aggregator Job
+echo "⚙️  Configuring Aggregator Job..."
+gcloud run jobs update lfe-aggregator \
+    --region "$REGION" \
+    --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,REGION=$REGION,INPUT_BUCKET=$INPUT_BUCKET,PROCESSING_BUCKET=$PROCESSING_BUCKET,ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+    --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest"
+
+# 4. Update Media Processor Job
+echo "⚙️  Configuring Media Processor Job..."
+gcloud run jobs update lfe-media-processor \
+    --region "$REGION" \
+    --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,REGION=$REGION,INPUT_BUCKET=$INPUT_BUCKET,ARCHIVE_BUCKET=$ARCHIVE_BUCKET" \
+    --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest"
+
+echo "✅ Environment Setup Complete."

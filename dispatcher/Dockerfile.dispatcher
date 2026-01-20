@@ -1,0 +1,34 @@
+# Dockerfile.dispatcher
+# Uses Node.js 20-slim for a balance of size and compatibility
+FROM node:20-slim
+
+# Install system dependencies required for PDF parsing libraries if needed (e.g., graphicsmagick, ghostscript)
+# strictly required for some "ignoreEncryption" capable libraries
+RUN apt-get update && apt-get install -y \
+	openssl \
+	ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+	
+WORKDIR /app
+
+# Copy package definition
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies (ensure typescript is in devDependencies or dependencies)
+RUN npm ci
+
+# Copy the full source code
+COPY . .
+
+# Build the TypeScript code
+RUN npm run build
+
+# Expose port (Cloud Run defaults to 8080)
+ENV PORT=8080
+EXPOSE 8080
+
+# Start the service
+# Assumes your entry point matches the service name. 
+# Adjust 'dist/media_processor.js' if your file is named differently (e.g., dist/index.js)
+CMD ["node", "dist/dispatcher/index.js"]

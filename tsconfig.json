@@ -11,6 +11,15 @@
     "outDir": "./dist",
     "rootDir": "./"
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*",
+    "processor/**/*",
+    "aggregator/**/*",
+    "media-processor/**/*",
+    "splitter/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

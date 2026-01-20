@@ -2,6 +2,14 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install system dependencies (FFmpeg for media processing, OpenSSL for DB)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    openssl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+
 # 1. Copy dependency definitions
 COPY package.json package-lock.json* ./
 # Copy sub-project package files if they exist to prevent install warnings, 
